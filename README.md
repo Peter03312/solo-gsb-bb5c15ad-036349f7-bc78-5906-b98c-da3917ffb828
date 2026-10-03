@@ -10,7 +10,8 @@
 - **现场执行台**：实时展示 待执行 / 已触发 / 已跳过 / 受阻（前置未触发） 四种状态
   - 仅当前置全部**已触发**时才可触发；受阻项触发按钮禁用且服务端同样拒绝
   - 跳过必须填写原因；每次结果留存操作人与时间
-  - **双人复核触发**：草稿中可将个别提示标记为「需双人复核」（发布后随版本锁定，旧版本提示按无需复核处理）。现场对这类提示发起的是**触发申请**（记录申请人与时间），提示仍不算已触发、下游前置仍受阻；须**另一操作人确认**且前置当前均已触发后，才写入有效触发流水。申请人可撤销待处理申请，其他人可填原因驳回，申请与处置全程留痕；待处理期间拒绝跳过、重复申请和撤回
+  - **预备口令（warning / standby）**：草稿中可把提示标记为「需预备」（`needs_prep`，发布后随版本锁定，旧版本提示按无需预备处理）。现场由**舞台监督填写本人姓名发出预备口令**，再由**另一位操作人（姓名须不同）确认**：确认时前置均已有效触发且无故障影响，口令才进入**已就绪**。口令本身**不是触发**、不产生执行流水、不能满足任何下游前置；同一提示同时至多一条待确认或已就绪口令，**重新发出使旧口令作废（留痕）**。仅就绪的需预备提示才可**单项或成组触发**，双人复核确认也会重查预备；前置的有效触发流水变化（撤回 / 重发）或提示受故障影响时**就绪立即失效**，解除故障不自动恢复；**跳过 / 触发消耗口令**，撤回后再次触发须重新预备；接续演出不承接预备状态，交接快照与封场报告可回看全部预备历史；只读（已接续）/ 已封场演出拒绝发出与确认
+  - **双人复核触发**：草稿中可将个别提示标记为「需双人复核」（发布后随版本锁定，旧版本提示按无需复核处理）。现场对这类提示发起的是**触发申请**（记录申请人与时间），提示仍不算已触发、下游前置仍受阻；须**另一操作人确认**且前置当前均已触发后，才写入有效触发流水。申请人可撤销待处理申请，其他人可填原因驳回，申请与处置全程留痕；待处理期间拒绝跳过、重复申请和撤回；若提示同时标记需预备，确认前还须预备口令已就绪（确认瞬间重查）
   - **撤回误触发**：对当前「已触发」的提示可撤回（须填撤回人与原因）；若其下游（沿前置关系可达的后续提示）仍有有效「已触发」，则整体拒绝并列出受影响编号，任何记录都不改变。撤回后原触发与撤回流水全部保留，提示按当前前置结果回到「待执行 / 受阻」，可再次触发或跳过；已跳过与未触发的提示不可撤回
   - 多人并发操作同一提示只记一次有效结果，冲突方会收到当前状态提示；复核的确认与撤销 / 驳回并发时也只有一种结局
 - **版本隔离与回看**：演出锁定启动时的已发布版本；排演改草稿不影响进行中的演出，历史演出始终按当时版本回看
@@ -53,10 +54,11 @@ npm start          # 或 node server.js
 ## 使用流程
 
 1. **新建场次** → 进入场次后「新建草稿」
-2. 在草稿编辑器中按序录入提示，前置提示填编号（逗号分隔）；危险或关键提示勾选「复核」列；随时「校验」
-3. 「校验并发布」→ 生成不可变执行单（如 v1），复核标记随版本锁定
+2. 在草稿编辑器中按序录入提示，前置提示填编号（逗号分隔）；危险或关键提示勾选「复核」列、需要预备确认的勾选「预备」列；随时「校验」
+3. 「校验并发布」→ 生成不可变执行单（如 v1），复核 / 预备标记随版本锁定
 4. 回到场次页「启动演出」，选择已发布版本 → 进入执行台
 5. 执行台中填写操作人，对提示执行「触发 / 跳过」；需复核提示点「申请触发」后在右侧「复核申请」面板由**另一操作人**确认（前置未齐会被拒并保持待复核），申请人可撤销、其他人可填原因驳回；误触发可点「撤回」并填写撤回人与原因；页面每 2.5 秒自动刷新，多人可同时操作；右侧展示复核申请处置记录与完整执行流水（含撤回记录）
+   - **预备口令**：对「需预备」提示点卡片上的「发预备口令」或在「📢 预备口令」面板操作（顶部操作人框填舞台监督姓名），再由**另一位操作人**在面板点「确认就绪」（前置未齐 / 有故障会被拒，口令保持待确认）；就绪后提示卡片与面板显示「✓ 已就绪」，此时才可触发（成组触发同样要求就绪，需双人复核的提示须就绪后再确认申请）。前置流水变化或登记故障会使就绪立即失效（面板保留失效原因，解除故障不自动恢复），需重新发令确认；触发 / 跳过后口令消耗，撤回再触发须重新预备
    - 需要连续处置多条提示时，用顶部「📋 成组连续处置」：按顺序添加编号与动作（触发 / 跳过 / 撤回）、填写各项原因，先「逐项预览」确认每步前置 / 下游 / 复核判定，再「整组提交」（事务内重判，任一失败整组不留流水；需双人复核的提示不在此触发）
    - **现场设备故障**：点提示卡片上的「⚠ 登记故障」或顶部「⚠ 现场设备故障」面板，按编号填写原因登记；面板展示影响范围（故障源 + 全部下游）与处理记录。故障未解除时受影响提示的触发按钮与待复核「确认触发」按钮冻结（跳过 / 撤回照常）；设备恢复后在面板点「解除故障」并填写处理人 / 原因，提示状态立即按当前有效结果重算，全过程不改写既有流水
 6. 排演中要改执行单：新建草稿（自动复制最新版本，含复核标记）→ 修改 → 发布为 v2；新演出即可选 v2，旧演出仍按 v1 回看
@@ -92,10 +94,10 @@ docker-compose.yml   # 一键启动 + 数据卷
 | POST | `/api/versions/:id/validate` | 校验（缺失引用 / 循环依赖） |
 | POST | `/api/versions/:id/publish` | 发布（校验失败 422 并附问题清单） |
 | POST | `/api/shows/:id/performances` | 启动演出（无已发布版本返回 400） |
-| GET | `/api/performances/:id` | 执行台状态（提示状态 + 事件流水 + 复核申请 + **设备故障** + **交接单**；附 `continuation` 接续关系与 `continue_targets` 可接续目标版本；各提示附 `needs_review`、`pending_request` 与故障字段 `fault_blocked` / `fault_blocked_labels` / `own_fault`；顶层附 `faults` 全部登记解除记录（含 `affected_labels`）与 `active_fault_count`；承接流水 `source:"carried"`；附当前待签收单 `handover`（含固定 `snapshot` 与按最新状态实时计算的 `live_diff`）及全部 `handover_history` 交接历史（`pending` / `signed` / `superseded`））；附封场信息 `closing`（未封场为 `null`；已封场含 `closed_by` / `closed_at` / `note` 与不可变 `report`），`continuation.closed` 标识已封场，`performance.status` 新增 `closed`） |
+| GET | `/api/performances/:id` | 执行台状态（提示状态 + 事件流水 + 复核申请 + **设备故障** + **预备口令** + **交接单**；附 `continuation` 接续关系与 `continue_targets` 可接续目标版本；各提示附 `needs_review`、`needs_prep`、`pending_request`、当前活动预备口令 `prep_command`（无则 `null`）与故障字段 `fault_blocked` / `fault_blocked_labels` / `own_fault`；顶层附 `faults` 全部登记解除记录（含 `affected_labels`）与 `active_fault_count`、`prep_commands` 全部预备口令（含消耗 / 重发作废 / 失效及原因）与 `active_prep_count`；承接流水 `source:"carried"`；附当前待签收单 `handover`（含固定 `snapshot`，快照新增 `active_prep_commands` 与未完成提示的 `prep_none` / `prep_pending` 阻塞原因，按最新状态实时计算的 `live_diff` 新增「预备口令」差异组）及全部 `handover_history` 交接历史（`pending` / `signed` / `superseded`））；附封场信息 `closing`（未封场为 `null`；已封场含 `closed_by` / `closed_at` / `note` 与不可变 `report`，报告新增 `prep_commands` / `prep_counts` 与各最终结果的 `needs_prep`），`continuation.closed` 标识已封场，`performance.status` 新增 `closed`） |
 | POST | `/api/performances/:id/continue/preview` | **接续前按编号核对**（不改数据）：返回有痕迹编号及标记 `hints`、冲突清单 `conflicts`、待处理申请 `pending_requests`、拟承接结果 `carried` 与 `can_continue` |
 | POST | `/api/performances/:id/continue` | **生成接续演出**（body：`version_id` 目标版本、`operator` 必填、`name` 可选）。成功返回新演出与承接清单；冲突 409 附编号与原因；只读演出 / 非更高或未发布目标 4xx |
-| POST | `/api/performances/:id/batch/preview` | **成组连续处置·逐项预览**（不改数据）：body `{operator, items:[{label,action,reason}]}`，`action` 为 `fire/skip/retract`。返回逐项判定 `results`、成功/失败计数与 `can_submit`；空清单、重复编号、非法动作 400；只读演出 409 |
+| POST | `/api/performances/:id/batch/preview` | **成组连续处置·逐项预览**（不改数据）：body `{operator, items:[{label,action,reason}]}`，`action` 为 `fire/skip/retract`。返回逐项判定 `results`、成功/失败计数与 `can_submit`；空清单、重复编号、非法动作 400；只读演出 409。**需预备提示的触发须口令已就绪（未发 / 待确认 / 已失效该步 422，附 `prep_status`）；组内前序步骤改变前置流水会使后续就绪口令在内存态级联失效；触发 / 跳过逐项消耗口令** |
 | POST | `/api/performances/:id/batch` | **成组连续处置·整组提交**：事务内按最新状态重新逐项判定，全部通过才依次写入与单项一致的流水并返回各项结果；任一项失败回滚、**整组不产生流水**，4xx 附逐项 `results`（含序号、编号、原因）；只读演出 409。**受未解除设备故障影响的编号触发判 422（附 `blocked_by_faults`），跳过 / 撤回不受故障影响** |
 | POST | `/api/performances/:id/cues/:cueId/faults` | **登记现场设备故障**（body：`operator`、`reason` 必填）：编号不属于该演出 404；信息为空 400；该编号已有未解除故障 409；只读演出 409。返回 `fault`（含沿前置关系计算的 `affected_labels`：故障编号本身及全部依赖它的后续提示）；不改写任何既有执行流水 |
 | POST | `/api/performances/:id/faults/:faultId/resolve` | **解除故障**（body：`operator`、`reason` 必填）：不存在 404；已解除 409；只读演出 409。解除后按当前有效结果重算提示状态（无新增 / 改写流水），返回剩余未解除故障与仍受影响编号 |
@@ -105,13 +107,15 @@ docker-compose.yml   # 一键启动 + 数据卷
 | POST | `/api/performances/:id/closeout/check` | **封场前只读核对**（不改数据）：返回 `can_close`、四类阻项 `blockers`（`pending_cues` 按编号附阻塞原因、`review_requests`、`active_faults`、`pending_handovers`）与 `counts`；已封场 / 只读演出 409 |
 | POST | `/api/performances/:id/closeout` | **执行封场**（body：`closed_by` 结项人、`note` 封场说明，均非空否则 400）：事务内串行最终核对，有阻项 422 且**演出保持可操作、不生成报告**；已接续只读演出不能封场 409。通过后一次性固定结项时间 / 结项人 / 不可变 `report` 并把演出置为 `closed`，返回 `{ closing, performance }`；重复封场 409。封场后该演出全部写操作（单项 / 成组 / 复核 / 故障 / 交接 / 接续）统一 409 |
 | GET | `/api/performances/:id/closeout` | **查看不可变封场报告**（执行台 GET 状态中也带 `closing` 字段）：未封场 404；只读 / 已封场演出均可查看 |
-| POST | `/api/performances/:id/cues/:cueId/fire` | 触发（前置未满足 422；**受未解除设备故障影响 422 附 `blocked_by_faults`**；已有结果 409 附当前状态；只读演出 409）。**需复核提示调用本接口不会直接触发**，而是登记复核申请并返回 `{ request }`（申请阶段不受故障限制，确认时才判定）；普通提示响应保持 `{ event }` |
+| POST | `/api/performances/:id/cues/:cueId/fire` | 触发（前置未满足 422；**需预备提示未发口令 / 口令待确认 / 就绪已失效时 422，附 `needs_prep` 与 `prep_status`**；**受未解除设备故障影响 422 附 `blocked_by_faults`**；已有结果 409 附当前状态；只读演出 409）。**需复核提示调用本接口不会直接触发**，而是登记复核申请并返回 `{ request }`（申请阶段不受故障 / 预备限制，确认时才判定）；普通提示响应保持 `{ event }`（触发消耗已就绪预备口令，并可能使其他提示的就绪口令失效，响应附 `invalidated_prep`） |
 | POST | `/api/performances/:id/cues/:cueId/skip` | 跳过（缺原因 400；已有结果 409；待复核期间 409；只读演出 409） |
 | POST | `/api/performances/:id/cues/:cueId/retract` | 撤回已触发（缺撤回人/原因 400；非已触发 409；下游仍已触发 409 附 `affected` 编号列表；待复核期间 409；只读演出 409） |
 | POST | `/api/performances/:id/cues/:cueId/review-requests` | 登记触发申请（仅需复核提示可用，普通提示 400；重复申请 409；只读演出 409） |
-| POST | `/api/performances/:id/review-requests/:reqId/confirm` | 确认申请（确认人须与申请人不同 409；前置未触发 422 且申请保持待复核；**受未解除设备故障影响 422 且申请保留待复核，解除后可再确认**；已处置 409；只读演出 409） |
+| POST | `/api/performances/:id/review-requests/:reqId/confirm` | 确认申请（确认人须与申请人不同 409；前置未触发 422 且申请保持待复核；**提示同时需预备时，预备口令未发 / 待确认 / 已失效同样 422，申请保持待复核**；**受未解除设备故障影响 422 且申请保留待复核，解除后可再确认**；已处置 409；只读演出 409。确认触发消耗就绪口令，响应附 `invalidated_prep`） |
 | POST | `/api/performances/:id/review-requests/:reqId/cancel` | 撤销申请（仅申请人本人，否则 409；已处置 409；只读演出 409） |
 | POST | `/api/performances/:id/review-requests/:reqId/reject` | 驳回申请（缺原因 400；申请人请走撤销 409；已处置 409；只读演出 409） |
+| POST | `/api/performances/:id/cues/:cueId/prep-commands` | **发出预备口令**（body：`issued_by` 发令的舞台监督姓名，也兼容 `operator`；缺姓名 400）：仅需预备且无有效结果的提示可发，非需预备提示 400；只读 / 封场演出 409；提示已有有效结果 409。同一提示同时至多一条活动口令：重新发出时旧活动口令置 `superseded`（作废留痕）并返回 `superseded_command_id`。口令不是触发、不产生流水。返回 `{command, superseded_command_id}` |
+| POST | `/api/performances/:id/prep-commands/:cmdId/confirm` | **确认预备口令就绪**（body：`operator` 确认操作人，也兼容 `confirmed_by`；缺姓名 400）：确认人须与发令人不同（409）；口令已处置 409；确认瞬间重查——提示无有效结果、前置当前均已有效触发（固定各前置 fired 流水 id 快照）、无未解除故障影响，任一不满足 422 且**口令保持待确认**（可稍后重新确认）。成功后 `ready`；只读 / 封场演出 409 |
 
 ## 撤回误触发（本轮新增）
 
@@ -204,7 +208,7 @@ curl http://localhost:3000/api/performances/1
 
 1. 舞台监督在执行台「改用修订执行单」面板选择**目标版本**（必须是同场次、版本号更高、已发布）并填写非空**操作人**；
 2. 先「按编号核对」：系统沿接续链汇总**原演出及其全部接续来源**中，有任意**触发 / 跳过 / 撤回流水、复核申请（含已处置）或承接结果**的编号；
-3. 核对要求：这些编号在新版中必须保留，且**类型、描述、前置编号集合、复核标记**与当前版本完全一致；同时演出上不得有**待处理（pending）复核申请**（先去确认 / 撤销 / 驳回）；
+3. 核对要求：这些编号在新版中必须保留，且**类型、描述、前置编号集合、复核标记**与当前版本完全一致；同时演出上不得有**待处理（pending）复核申请**（先去确认 / 撤销 / 驳回）；**活动预备口令不阻断接续**（口令不承接，接续时统一作废留痕）；
 4. 通过后「生成接续演出」：新建演出绑定新版本（可操作），原演出仍绑定原版本快照并立即转为**只读**；
 5. 接续演出**继承有效结果**（当前有效 `fired`/`skipped`）：复制为 `source:"carried"` 的流水，保留原操作人与原时间，并记录来源演出与来源事件——**不是再次触发**；已撤回 / 未执行的提示不继承，按新版依赖重新计算「待执行 / 受阻」（承接的已触发同样满足前置）；
 6. 原演出的流水、复核申请全部保留可查，执行台顶部以横幅展示「承接自 / 已接续到」关系，提示卡片与流水对承接结果标注「承接」徽章。
@@ -600,7 +604,7 @@ curl http://localhost:3000/api/performances/1
 
 - 结项时间、**结项人**（非空）、封场说明（非空）；
 - 每条提示的最终结果及**原操作人、时间、流水 id 与来源演出**：本场 `manual` 结果记录本场操作人；**承接（carried）结果沿接续链逐级追溯到原流水**——报告中给出 `origin`（原演出 / 原版本 / 原流水 / 原操作人 / 原时间）与 `origin_hops`（从本场到原流水的完整承接链），沿用原操作人与原时间，**不算作本场再次触发**（本场统计区分 `manual_event_count` 与 `carried_event_count`）；
-- 同时固定全部复核申请（含处置结果）、故障登记 / 解除记录、交接单清单与本场完整流水，供永久回看。
+- 同时固定全部复核申请（含处置结果）、故障登记 / 解除记录、**预备口令全量历史（发出 / 确认 / 消耗 / 重发作废 / 失效及原因，`prep_commands` + `prep_counts`）**、交接单清单与本场完整流水，供永久回看。
 
 **终态与串行**
 
@@ -703,17 +707,118 @@ curl http://localhost:3000/api/performances/2
 #   continuation.closed = true；performance.status = "closed"
 ```
 
+## 预备口令 warning / standby（本轮新增）
+
+排演草稿中可把提示勾选「预备」（`needs_prep`），发布后随版本锁定；旧版本提示（含既有演示数据）默认按**无需预备**处理（旧库启动自动补列迁移）。现场对需预备提示的触发增加一道**发令 → 确认就绪**的口令流程：
+
+1. **舞台监督填写本人姓名发出预备口令**（`issued_by`）；口令本身不是触发，不写入 `cue_events` 流水，不能满足任何下游前置；
+2. **另一位操作人（姓名须不同于发令人）确认**：确认瞬间重查——提示仍无有效结果、前置当前均已**有效触发**（并固定各前置的 `fired` 流水 id 快照 `dep_event_snapshot`）、无未解除故障影响，口令才置为**已就绪（ready）**；任一条件不满足返回 422，**口令保持待确认**，稍后条件满足可再次确认；
+3. 需预备提示只有在**已就绪**后才可触发：单项触发、**成组触发**、**双人复核确认**（同时勾选复核时）都会重查预备；
+4. 就绪不是永久状态：
+
+   - **前置有效触发流水变化**（前置被撤回 / 跳过 / 撤回后重新触发等，使确认时固定的某前置 fired 流水 id 不再是该前置的当前有效 fired 流水）→ 就绪口令置 `invalidated(dep_changed)`；
+   - **受未解除设备故障影响**（故障提示本身或其下游）→ 登记故障时就绪口令置 `invalidated(fault)`；**解除故障不自动恢复**，须重新发令、重新确认；
+   - 待确认（pending）口令不因上述变化自动失效——确认时自然会被拒并保持待确认；
+5. **跳过 / 触发消耗口令**：触发成功（含成组、复核确认后的触发）后就绪口令置 `consumed` 并关联触发流水；**跳过不要求先就绪**，跳过时若口令已就绪同样 `consumed`、若仍待确认则置 `invalidated(cue_skipped)`；**撤回后再次触发须重新预备**；
+6. **同一提示同时至多一条**待确认或已就绪口令（部分唯一索引保证）：重新发出时旧活动口令置 `superseded`（全量留痕）后写入新口令；各次状态变化（发出 / 确认 / 失效及原因 / 消耗 / 重发作废）全部留痕；
+7. **接续演出不承接预备状态**：接续事务中原演出的全部活动口令置 `invalidated(performance_continued)`，接续演出无任何口令，需预备提示一律重新预备；
+8. **只读（已接续）/ 已封场演出拒绝一切口令写入**（发出 / 确认统一 409）；预备口令全量历史可在执行台状态、**交接快照**（快照新增「活动预备口令」分组，签收差异新增「预备口令」组）与**封场报告**（`prep_commands` / `prep_counts`）中回看。
+
+所有口令判定与触发 / 跳过 / 撤回 / 复核 / 成组 / 故障 / 交接 / 接续 / 封场在同一 `BEGIN IMMEDIATE` 写事务内串行：每次流水或故障写入后扫描全部就绪口令（前置流水 id 快照比对 + 故障影响），成组提交在事务内还会再扫一遍，保证就绪失效与现场变化不可能交叉。
+
+**调用示例**（假设演出 id=2；提示 L2 标记需预备、前置 L1）：
+
+```bash
+# 1) 舞台监督发出预备口令（缺姓名 400；对无需预备提示发口令 400；提示已有结果 409）
+curl -X POST http://localhost:3000/api/performances/2/cues/4/prep-commands \
+  -H 'Content-Type: application/json' \
+  -d '{"issued_by":"王监"}'
+# → 200
+# {"command":{"id":1,"cue_id":4,"label":"L2","status":"pending",
+#   "issued_by":"王监","issued_at":"…","confirmed_by":null,
+#   "dep_event_snapshot":null,"invalidated_reason":null},
+#  "superseded_command_id":null}
+
+# 2) 发令人本人确认 → 409
+curl -X POST http://localhost:3000/api/performances/2/prep-commands/1/confirm \
+  -H 'Content-Type: application/json' -d '{"operator":"王监"}'
+# → 409 {"error":"预备口令确认人不能与发令人相同，须由另一操作人确认"}
+
+# 3) 前置 L1 尚未有效触发时另一操作人确认 → 422，口令保持待确认
+curl -X POST http://localhost:3000/api/performances/2/prep-commands/1/confirm \
+  -H 'Content-Type: application/json' -d '{"operator":"李四"}'
+# → 422 {"error":"前置提示未全部有效触发，预备口令保持待确认：L1",
+#        "unmet":["L1"],"command":{"status":"pending",…}}
+
+# 4) 触发 L1 后再次确认 → ready，并固定前置 fired 流水 id 快照
+curl -X POST http://localhost:3000/api/performances/2/cues/3/fire \
+  -H 'Content-Type: application/json' -d '{"operator":"张三"}'
+curl -X POST http://localhost:3000/api/performances/2/prep-commands/1/confirm \
+  -H 'Content-Type: application/json' -d '{"operator":"李四"}'
+# → 200 {"command":{"id":1,"status":"ready","confirmed_by":"李四","confirmed_at":"…",
+#                   "dep_event_snapshot":{"L1":7}}}
+
+# 5) 就绪后才可触发（单项 / 成组一致）
+curl -X POST http://localhost:3000/api/performances/2/cues/4/fire \
+  -H 'Content-Type: application/json' -d '{"operator":"赵操作"}'
+# → 200 {"event":{"action":"fired",…}, "invalidated_prep":[]}
+# 未就绪直接触发 → 422：
+# {"error":"提示「L2」需预备确认：尚未发出预备口令，请先由舞台监督发出预备口令并经另一操作人确认就绪后再触发",
+#  "needs_prep":true,"prep_status":"none"}
+# 口令待确认时 → 422 prep_status:"pending"；就绪已失效时 → 422 prep_status:"stale"
+
+# 6) 前置流水变化使就绪失效：撤回 L1（下游保护允许时）→ L2 的就绪口令被级联失效
+# → 撤回 L1 的响应：{"event":{…"action":"retracted"},
+#    "invalidated_prep":[{"id":1,"label":"L2","status":"invalidated",
+#      "invalidated_reason":"dep_changed",
+#      "invalidated_reason_text":"前置有效触发流水变化",
+#      "invalidated_detail":"前置不再处于有效已触发：L1；前置有效触发流水已变化：L1"}]}
+# 此后触发 L2 → 422（prep_status:"stale"），必须重新发令、重新确认；解除任何状态都不会自动恢复
+
+# 7) 故障使就绪失效（解除不恢复）
+curl -X POST http://localhost:3000/api/performances/2/cues/3/faults \
+  -H 'Content-Type: application/json' -d '{"operator":"王监","reason":"调光台死机"}'
+# → 200 {"fault":{…"affected_labels":["L1","L2"]},
+#        "invalidated_prep":[{"label":"L2","status":"invalidated","invalidated_reason":"fault",…}]}
+# 待确认口令不受故障自动作废，但确认时 → 422 并附 blocked_by_faults、口令保持 pending
+
+# 8) 重新发出使旧口令作废（同一提示至多一条活动口令）
+curl -X POST http://localhost:3000/api/performances/2/cues/4/prep-commands \
+  -H 'Content-Type: application/json' -d '{"issued_by":"王监"}'
+# → 200 {"command":{"id":2,"status":"pending",…},"superseded_command_id":1}
+# 旧口令 #1 → status:"superseded"（留痕）
+
+# 9) 跳过消耗：待确认口令随跳过置 invalidated(cue_skipped)；已就绪口令随跳过置 consumed
+#    （跳过本身不要求先就绪）
+
+# 10) 执行台状态：每提示活动口令 + 全部口令历史
+curl http://localhost:3000/api/performances/2
+# {
+#   "active_prep_count": 1,
+#   "prep_commands": [
+#     {"id":2,"label":"L2","status":"pending","status_text":"待确认","issued_by":"王监",…},
+#     {"id":1,"label":"L2","status":"superseded","status_text":"已被重新发出作废",…},
+#     {"id":0,"label":"L2","status":"invalidated","invalidated_reason":"dep_changed",…}
+#   ],
+#   "cues":[{"label":"L2","needs_prep":true,
+#            "prep_command":{"id":2,"status":"pending",…} 或 null, …}]
+# }
+```
+
+成组处置中需预备提示的触发同样要求当前存在**已就绪**口令（逐项预览中未发 / 待确认 / 已失效均为该步 422，附 `prep_status`，`can_submit=false`）；组内前序步骤撤回 / 重发前置会使后续就绪口令在内存态级联失效，正式提交时任一就绪不满足则整组回滚、不留流水，提交成功后就绪口令随各自触发 / 跳过逐项消耗。接续演出的 GET 中 `prep_commands` 为空（不承接）；封场报告含全部口令历史（`report.prep_commands` / `report.prep_counts`）。
+
 ## 数据与并发说明
 
 - `cue_events` 为**流水表**：触发 / 跳过 / 撤回逐条追加，全量留痕；同一演出同一提示的「当前有效结果」由最新一条事件推导（`retracted` 表示已撤回、当前无有效结果），至多一个当前有效结果。`source` 区分 `manual`（现场操作）与 `carried`（接续时自来源演出承接，附 `carried_from_performance_id` / `carried_from_event_id`，沿用原操作人与时间，非再次触发）
 - `cue_review_requests` 为**复核申请表**：申请（申请人、时间）与处置（确认 / 撤销 / 驳回、处置人、时间、原因、关联的触发流水 `event_id`）全量留痕；`pending → confirmed / cancelled / rejected` 为终态迁移，同一提示至多一条待复核申请
-- `cue_faults` 为**现场设备故障表**：登记（编号、登记人、原因、时间）与解除（解除人、时间、原因）全量留痕，`active → resolved` 终态迁移；部分唯一索引 `WHERE status='active'` 保证同一演出同一提示至多一条未解除故障。故障为独立记录，**不改写任何执行流水**；影响范围（故障编号本身 + 沿前置关系反向可达的全部下游）在读取时按版本依赖实时计算，解除后自然消失，提示状态按当前有效结果重算
-- `cue_handovers` 为**现场换班交接表**：提交（交班人、接班人、说明、固定快照 JSON、时间）、签收（`signed_at`）、重提替换（`superseded` + `superseded_at` + `superseded_by_handover_id`）全量留痕，状态机 `pending → signed`（签收终态、不可变）或 `pending → superseded`（原交班人重提 / 接续作废旧单）。部分唯一索引 `WHERE status='pending'` 保证**同一演出至多一张待签收单**；快照只在提交 / 重提时写入，签收核对始终实时比对当前状态而不修改快照
+- `cue_faults` 为**现场设备故障表**：登记（编号、登记人、原因、时间）与解除（解除人、时间、原因）全量留痕，`active → resolved` 终态迁移；部分唯一索引 `WHERE status='active'` 保证同一演出同一提示至多一条未解除故障。故障为独立记录，**不改写任何执行流水**；影响范围（故障编号本身 + 沿前置关系反向可达的全部下游）在读取时按版本依赖实时计算，解除后自然消失，提示状态按当前有效结果重算；登记故障的写事务同时扫描并失效受影响的**已就绪预备口令**（解除不恢复）
+- `cue_prep_commands` 为**预备口令表**：发出（`issued_by` / `issued_at`）、确认就绪（`confirmed_by` / `confirmed_at` 与前置 fired 流水 id 快照 `dep_event_snapshot`）、消耗（`consumed` + `consumed_event_id`）、重新发出作废（`superseded` + `superseded_by_command_id`）、失效（`invalidated` + `invalidated_reason`：`dep_changed` / `fault` / `cue_skipped` / `performance_continued`，及 `invalidated_detail` / `invalidated_at`）全量留痕。部分唯一索引 `WHERE status IN ('pending','ready')` 保证**同一演出同一提示至多一条活动口令**；口令不是触发、无 `cue_events` 流水，就绪判定在每次写事务后按快照 + 故障影响实时扫描
+- `cue_handovers` 为**现场换班交接表**：提交（交班人、接班人、说明、固定快照 JSON、时间）、签收（`signed_at`）、重提替换（`superseded` + `superseded_at` + `superseded_by_handover_id`）全量留痕，状态机 `pending → signed`（签收终态、不可变）或 `pending → superseded`（原交班人重提 / 接续作废旧单）。部分唯一索引 `WHERE status='pending'` 保证**同一演出至多一张待签收单**；快照只在提交 / 重提时写入（含活动预备口令与未完成提示的预备阻塞原因），签收核对始终实时比对当前状态（差异含「预备口令」组）而不修改快照
 - `performances` 记录接续关系：`status`（`active` 可操作 / `readonly` 已接续只读 / `closed` 已封场结项终态）、`continued_from_performance_id`（来源演出）、`continued_at/by`（接续时间与操作人）；接续演出绑定目标版本，原演出仍绑定原版本快照
 - `performance_closings` 为**演出封场结项表**：每演出唯一一条（部分外键 + UNIQUE），记录结项人 `closed_by`、封场说明 `note`、结项时间 `closed_at` 与**不可变封场报告** `report`（固定 JSON：最终提示结果及原操作人 / 时间 / 流水 / 来源演出，承接结果沿接续链追溯到原流水 `origin/origin_hops`，另含复核申请、故障、交接单与完整流水快照）。封场在同一写事务内「核对阻项 → 写封场记录 → 置 `performances.status='closed'`」原子完成；封场后该演出一切写操作（单项 / 成组处置、复核、故障、交接、接续、重复封场）统一拒绝，原记录与报告仅可回看（GET 不受限）
-- 触发、跳过、撤回、复核处置、成组提交、**故障登记 / 解除**、**交接提交 / 重提 / 签收**、**封场核对 / 执行**与**接续**均在 `BEGIN IMMEDIATE` 事务内「读最新事件 / 申请 / 故障 / 交接单 / 演出状态 → 判定 → 写入」，并发操作串行判定，后到的冲突请求收到对应错误与当前状态（操作人、时间、原因、故障清单、交接差异、接续演出位置、封场阻项清单）。交接单本身**不冻结任何现场操作**：交接期间触发 / 跳过 / 撤回 / 复核 / 成组 / 故障照常，变化只在签收核对时体现为差异。未解除故障只冻结受影响提示的**触发**（含复核确认），跳过与撤回按原有规则判定；成组提交在事务内对整组清单**重新逐项判定**，任一项失败整体回滚（含同组已拟写入项），因此成组提交不可能只落一半流水；**封场在事务内对当前版本逐条复核提示结果与四类阻项，任一不满足整体回滚，演出保持可操作，不可能出现部分结项**；成组预览、封场核对为只读判定（Node 单线程同步读，不穿插写操作），不写任何数据
+- 触发、跳过、撤回、复核处置、成组提交、**故障登记 / 解除**、**预备口令发出 / 确认**、**交接提交 / 重提 / 签收**、**封场核对 / 执行**与**接续**均在 `BEGIN IMMEDIATE` 事务内「读最新事件 / 申请 / 故障 / 预备口令 / 交接单 / 演出状态 → 判定 → 写入」，并发操作串行判定，后到的冲突请求收到对应错误与当前状态（操作人、时间、原因、故障清单、预备口令状态、交接差异、接续演出位置、封场阻项清单）。交接单本身**不冻结任何现场操作**：交接期间触发 / 跳过 / 撤回 / 复核 / 成组 / 故障 / 预备照常，变化只在签收核对时体现为差异。未解除故障只冻结受影响提示的**触发**（含复核确认、预备确认），跳过与撤回按原有规则判定；**需预备提示的触发（含成组与复核确认）必须持有当前仍满足条件（前置流水 id 快照一致且无故障影响）的已就绪口令，任何写事务后就绪口令都会被重新扫描，失效即留痕且不自动恢复**；成组提交在事务内对整组清单**重新逐项判定**，任一项失败整体回滚（含同组已拟写入项），因此成组提交不可能只落一半流水；**封场在事务内对当前版本逐条复核提示结果与四类阻项，任一不满足整体回滚，演出保持可操作，不可能出现部分结项**；成组预览、封场核对为只读判定（Node 单线程同步读，不穿插写操作），不写任何数据
 - 前置是否满足、提示状态（待执行/已触发/已跳过/受阻）均按**当前有效结果**计算：前置被撤回后，未执行的下游提示重新变为受阻；复核确认时同样按当前有效结果判定，前置失效或存在故障则确认拒绝且申请保持待复核；接续后未执行提示一律按**新版依赖**重算（承接的已触发计入满足）
 - 接续前的按编号核对覆盖**整条接续链**（当前演出 + 逐级来源演出）：任一环节有触发 / 跳过 / 撤回流水、复核申请或承接结果的编号都须在新版保留其编号、类型、描述、前置集合与复核标记，且当前无待处理申请，否则整体拒绝并按编号返回原因
-- 旧版数据库启动时自动迁移：`cue_events` 唯一约束表重建为流水表、`cues` 补 `needs_review` 列（既有提示默认 0，按无需复核处理），`performances` 补 `status / continued_from_performance_id / continued_at / continued_by` 列（既有演出默认 `active`），`cue_events` 补 `source / carried_from_*` 列（既有流水默认 `manual`），并自动新建 `cue_faults` 故障登记表（含 active 部分唯一索引）与 `cue_handovers` 交接单表（含 pending 部分唯一索引）；本轮再把 `performances.status` 的 CHECK 扩展为允许 `closed`（检测后重建表、保留全部列与记录）并新建 `performance_closings` 封场表，全部历史记录保留，无需手工操作
+- 旧版数据库启动时自动迁移：`cue_events` 唯一约束表重建为流水表、`cues` 补 `needs_review` 列（既有提示默认 0，按无需复核处理），`performances` 补 `status / continued_from_performance_id / continued_at / continued_by` 列（既有演出默认 `active`），`cue_events` 补 `source / carried_from_*` 列（既有流水默认 `manual`），并自动新建 `cue_faults` 故障登记表（含 active 部分唯一索引）与 `cue_handovers` 交接单表（含 pending 部分唯一索引）；再把 `performances.status` 的 CHECK 扩展为允许 `closed`（检测后重建表、保留全部列与记录）并新建 `performance_closings` 封场表；本轮再给 `cues` 补 `needs_prep` 列（既有提示默认 0，按无需预备处理）并新建 `cue_prep_commands` 预备口令表（含 `pending/ready` 活动口令部分唯一索引），全部历史记录保留，无需手工操作
 - 演出与版本通过外键绑定，版本发布后无更新入口（含 `needs_review` 标记），因此历史回看永远呈现演出当时的执行单内容；接续只新建演出并把原演出置为只读，**不改动任何版本快照**
 - 接续关系可在执行台顶部横幅与场次页演出记录中查看；只读演出仍可随时打开回看其流水、复核申请与当时版本

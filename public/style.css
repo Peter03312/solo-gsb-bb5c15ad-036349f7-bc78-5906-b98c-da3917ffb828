@@ -304,3 +304,36 @@ button.fault-btn { color: var(--fault); border-color: #6b512c; margin-top: 2px; 
 .closing-reason-row td { padding-top: 0; font-size: 12px; }
 .origin-hops { margin-top: 2px; font-size: 12px; }
 .hint-flag.flag-review { color: #b9a7f2; border-color: #5a4d86; background: #262238; }
+
+/* ---- 预备口令（warning/standby） ---- */
+:root {
+  --prep: #4db8d8;
+  --prep-ready: #46d39a;
+}
+.badge.prep-badge { background: #13343d; color: var(--prep); border: 1px solid var(--prep); }
+.badge.prep-ready-badge { background: #123a2c; color: var(--prep-ready); border: 1px solid var(--prep-ready); }
+.badge.prep-pending-badge { background: #13343d; color: var(--prep); border: 1px solid var(--prep); }
+.badge.prep-consumed { background: #262a35; color: var(--muted); }
+.badge.prep-superseded { background: #262a35; color: var(--muted); }
+.badge.prep-invalidated { background: #3a2a17; color: var(--fault); border: 1px solid #6b512c; }
+.status.prep-pending-chip { color: var(--prep); }
+.status.prep-ready-chip { color: var(--prep-ready); }
+.prep-pending-text { color: var(--prep); font-weight: 600; }
+.prep-ready-text { color: var(--prep-ready); font-weight: 600; }
+.prep-none-text { color: #7fb8c9; font-size: 12px; }
+.cue-card.prep-cue { border-left-style: double; }
+button.prep-btn { color: var(--prep); border-color: #2c5b66; margin-top: 2px; }
+.hint-flag.flag-prep { color: var(--prep); border-color: var(--prep); background: #122c33; }
+
+.prep-panel { border-left: 4px solid var(--prep); margin-bottom: 16px; }
+.prep-panel.collapsed { border-left-color: var(--border); }
+.prep-active-list { padding-left: 0; margin: 0; list-style: none; }
+.prep-active-list li {
+  border: 1px solid #2c5b66; border-radius: 8px; padding: 10px 12px;
+  margin: 8px 0; background: rgba(77, 184, 216, 0.06); font-size: 13px;
+}
+.prep-active-list li.ready { border-color: #1f6e4f; background: rgba(70, 211, 154, 0.07); }
+.prep-confirm-btn { margin-top: 8px; }
+.prep-history { margin-top: 10px; font-size: 13px; }
+.prep-history li { margin: 6px 0; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
+.prep-history .badge { margin-right: 4px; }

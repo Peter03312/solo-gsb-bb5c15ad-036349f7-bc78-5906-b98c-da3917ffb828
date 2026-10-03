@@ -229,6 +229,7 @@ function collectEditorCues() {
     description: c.description.trim(),
     deps: c.depsText.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean),
     needs_review: !!c.needs_review,
+    needs_prep: !!c.needs_prep,
   }));
 }
 
@@ -247,6 +248,7 @@ function renderEditorTable() {
       <td><input type="text" data-i="${i}" data-f="description" value="${esc(c.description)}" placeholder="提示内容描述"></td>
       <td><input type="text" class="deps-input" data-i="${i}" data-f="depsText" value="${esc(c.depsText)}" placeholder="前置编号，逗号分隔"></td>
       <td style="text-align:center"><input type="checkbox" data-i="${i}" data-f="needs_review" ${c.needs_review ? 'checked' : ''} title="现场触发需另一操作人复核确认"></td>
+      <td style="text-align:center"><input type="checkbox" data-i="${i}" data-f="needs_prep" ${c.needs_prep ? 'checked' : ''} title="现场触发前需舞台监督发预备口令、另一操作人确认就绪"></td>
       <td style="white-space:nowrap">
         <button class="ghost small" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button class="ghost small" data-act="down" data-i="${i}" ${i === editorCues.length - 1 ? 'disabled' : ''}>↓</button>
@@ -297,7 +299,7 @@ async function renderVersion(id) {
         <p class="muted">发布于 ${fmtTime(version.published_at)}　${esc(version.note || '')}</p>
         <div class="panel">
           <table>
-            <thead><tr><th>#</th><th>编号</th><th>类型</th><th>描述</th><th>前置提示</th><th>复核</th></tr></thead>
+            <thead><tr><th>#</th><th>编号</th><th>类型</th><th>描述</th><th>前置提示</th><th>复核</th><th>预备</th></tr></thead>
             <tbody>
               ${cues.map(c => `
                 <tr>
@@ -307,6 +309,7 @@ async function renderVersion(id) {
                   <td>${esc(c.description)}</td>
                   <td>${c.deps.length ? c.deps.map(d => `<span class="dep-chip">${esc(d)}</span>`).join('') : '<span class="muted">无</span>'}</td>
                   <td>${c.needs_review ? '<span class="badge review">双人复核</span>' : '<span class="muted">—</span>'}</td>
+                  <td>${c.needs_prep ? '<span class="badge prep-badge">需预备</span>' : '<span class="muted">—</span>'}</td>
                 </tr>`).join('')}
             </tbody>
           </table>
@@ -331,14 +334,15 @@ async function renderVersion(id) {
     editorCues = cues.map(c => ({
       label: c.label, type: c.type, description: c.description, depsText: c.deps.join(', '),
       needs_review: !!c.needs_review,
+      needs_prep: !!c.needs_prep,
     }));
 
     app.innerHTML = `
       <h1>执行单 v${version.version_number} <span class="badge draft">草稿</span></h1>
-      <p class="muted">前置提示填写其他提示的编号（逗号分隔）。勾选「复核」的提示现场触发时需另一操作人确认。保存不影响已开始的演出。</p>
+      <p class="muted">前置提示填写其他提示的编号（逗号分隔）。勾选「复核」的提示现场触发时需另一操作人确认；勾选「预备」的提示现场须先发预备口令、由另一操作人确认就绪后才可触发（标记均随发布锁定，旧版按无需处理）。保存不影响已开始的演出。</p>
       <div class="panel">
         <table class="editor-table">
-          <thead><tr><th>#</th><th>编号</th><th>类型</th><th>描述</th><th>前置提示</th><th>复核</th><th>操作</th></tr></thead>
+          <thead><tr><th>#</th><th>编号</th><th>类型</th><th>描述</th><th>前置提示</th><th>复核</th><th>预备</th><th>操作</th></tr></thead>
           <tbody id="editor-tbody"></tbody>
         </table>
         <div class="row" style="margin-top:12px">
@@ -426,7 +430,7 @@ async function renderPerformance(id) {
   } catch (e) { app.innerHTML = `<div class="error-list">${esc(e.message)}</div>`; }
 }
 
-function drawPerformance(id, { performance: perf, continuation, continue_targets: targets, cues, events, review_requests: reviewRequests, faults, active_fault_count: activeFaultCount, handover, handover_history: handoverHistory, closing }) {
+function drawPerformance(id, { performance: perf, continuation, continue_targets: targets, cues, events, review_requests: reviewRequests, faults, active_fault_count: activeFaultCount, prep_commands: prepCommands, active_prep_count: activePrepCount, handover, handover_history: handoverHistory, closing }) {
   // 2.5s 轮询整体重绘：记住当前焦点与光标位置，重绘后恢复，避免输入被打断
   const active = document.activeElement;
   const focusKey = active && (active.dataset.focusKey || (active.id === 'operator-input' ? 'operator' : null));
@@ -448,6 +452,11 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   // 受故障影响（触发被冻结）的提示去重计数（含故障编号本身及其全部下游）
   const blockedByFaultSet = new Set();
   activeFaults.forEach(f => (f.affected_labels || []).forEach(l => blockedByFaultSet.add(l)));
+
+  // 预备口令：活动口令数（待确认 / 已就绪）与全部历史（供面板回看）
+  const prepList = prepCommands || [];
+  const readyPrepCount = prepList.filter(k => k.status === 'ready').length;
+  const pendingPrepCount = prepList.filter(k => k.status === 'pending').length;
 
   // 正在操作人框中输入时保留 DOM 中的实时值（下方 innerHTML 重绘前取出），避免光标跳尾
   const opFocused = focusKey === 'operator';
@@ -477,6 +486,8 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
         <span class="status blocked">受阻 ${counts.blocked}</span>
         ${pendingReqs.length ? `<span class="status review-pending">待复核 ${pendingReqs.length}</span>` : ''}
         ${activeFaults.length ? `<span class="status fault-active">⚠ 故障 ${activeFaults.length} · 冻结 ${blockedByFaultSet.size}</span>` : ''}
+        ${pendingPrepCount ? `<span class="status prep-pending-chip">预备待确认 ${pendingPrepCount}</span>` : ''}
+        ${readyPrepCount ? `<span class="status prep-ready-chip">✓ 已就绪 ${readyPrepCount}</span>` : ''}
         ${handover ? `<span class="status handover-pending-chip">🔁 交接待签收 · ${esc(handover.received_by)}</span>` : ''}
         <span class="grow"></span>
         <label>操作人 <input id="operator-input" type="text" value="${esc(opVal)}" placeholder="姓名" style="width:110px" ${locked ? 'disabled' : ''}></label>
@@ -487,6 +498,7 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
     ${locked ? '' : '<div id="batch-panel-mount"></div>'}
     <div id="handover-panel-mount"></div>
     <div id="fault-panel-mount"></div>
+    <div id="prep-panel-mount"></div>
     ${locked ? '' : '<div id="continue-panel-mount"></div>'}
     <div id="closing-panel-mount"></div>
     <div class="grid-2">
@@ -509,14 +521,16 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
             ${pendingReqs.map(r => {
               const reqCue = cues.find(c => c.label === r.label);
               const reqFault = !!(reqCue && (reqCue.fault_blocked || []).length);
+              const reqPrep = !!(reqCue && reqCue.needs_prep && (!reqCue.prep_command || reqCue.prep_command.status !== 'ready'));
               return `
               <li>
                 <span class="status review-pending">待复核</span>
-                <b>${esc(r.label)}</b>${reqFault ? '<span class="badge fault-badge">故障冻结</span>' : ''}<br>
+                <b>${esc(r.label)}</b>${reqFault ? '<span class="badge fault-badge">故障冻结</span>' : ''}${reqPrep ? '<span class="badge prep-pending-badge">预备未就绪</span>' : ''}<br>
                 <span class="muted">申请人 ${esc(r.requested_by)} · ${fmtTime(r.requested_at)}</span><br>
                 ${reqFault ? '<span class="fault-note-text">受未解除故障影响，申请保留但故障解除前不得确认</span><br>' : ''}
+                ${reqPrep ? '<span class="prep-none-text">需先发预备口令并由另一操作人确认就绪，复核确认才会通过</span><br>' : ''}
                 <span class="review-actions">
-                  <button class="small" data-req-act="confirm" data-req="${r.id}" ${locked || reqFault ? 'disabled' : ''}>确认触发</button>
+                  <button class="small" data-req-act="confirm" data-req="${r.id}" ${locked || reqFault || reqPrep ? 'disabled' : ''}>确认触发</button>
                   <button class="danger small" data-req-act="reject" data-req="${r.id}" ${locked ? 'disabled' : ''}>驳回</button>
                   <button class="ghost small" data-req-act="cancel" data-req="${r.id}" ${locked ? 'disabled' : ''}>撤销</button>
                 </span>
@@ -557,11 +571,12 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   const opInput = document.getElementById('operator-input');
   if (opInput) opInput.onchange = opInput.oninput = () => localStorage.setItem('operator', opInput.value.trim());
 
-  // 只读（已接续）/ 已封场演出仍展示交接、故障与封场报告（回看形态，无任何写操作表单）
+  // 只读（已接续）/ 已封场演出仍展示交接、故障、预备与封场报告（回看形态，无任何写操作表单）
   drawHandoverPanel(id, handover, handoverHistory || [], true);
   drawClosingPanel(id, closing, closed || readonly);
   if (locked) {
     drawFaultPanel(id, cues, faultList, activeFaults, true);
+    drawPrepPanel(id, cues, prepList, true);
     return;
   }
 
@@ -570,10 +585,12 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
     const skipBtn = document.getElementById(`skip-${c.id}`);
     const retractBtn = document.getElementById(`retract-${c.id}`);
     const faultBtn = document.getElementById(`fault-${c.id}`);
+    const prepBtn = document.getElementById(`prep-${c.id}`);
     if (fireBtn) fireBtn.onclick = () => doFire(id, c.id);
     if (skipBtn) skipBtn.onclick = () => doSkip(id, c.id);
     if (retractBtn) retractBtn.onclick = () => doRetract(id, c.id);
     if (faultBtn) faultBtn.onclick = () => doRegisterFault(id, c.label);
+    if (prepBtn) prepBtn.onclick = () => doIssuePrep(id, c.id, c.label);
   });
 
   app.querySelectorAll('[data-req-act]').forEach(btn => {
@@ -585,9 +602,17 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
       else if (act === 'cancel') doCancelRequest(id, reqId);
     };
   });
+  app.querySelectorAll('[data-prep-act]').forEach(btn => {
+    btn.onclick = () => {
+      const cmdId = Number(btn.dataset.cmd);
+      const act = btn.dataset.prepAct;
+      if (act === 'confirm') doConfirmPrep(id, cmdId);
+    };
+  });
 
   drawBatchPanel(id, cues);
   drawFaultPanel(id, cues, faultList, activeFaults, readonly);
+  drawPrepPanel(id, cues, prepList, false);
   drawContinuePanel(id, targets || []);
   drawHandoverPanel(id, handover, handoverHistory || [], false);
   drawClosingPanel(id, closing, false);
@@ -614,6 +639,7 @@ const HANDOVER_DIFF_SECTIONS = [
   ['cue_results', '有效结果'],
   ['review_requests', '复核申请'],
   ['active_faults', '未解除故障'],
+  ['active_prep_commands', '预备口令'],
   ['pending_cues', '未完成提示'],
 ];
 
@@ -703,6 +729,7 @@ function renderPendingHandover(perfId, h, readonly, st) {
   const pendingCues = snap.pending_cues || [];
   const reqs = snap.pending_requests || [];
   const faults = snap.active_faults || [];
+  const preps = snap.active_prep_commands || [];
 
   const diffBanner = readonly ? '' : live.matched
     ? '<div class="ok-box handover-diff-ok">✓ 与当前最新状态逐项核对一致，接班人可以签收。</div>'
@@ -753,6 +780,13 @@ function renderPendingHandover(perfId, h, readonly, st) {
       ${faults.length === 0 ? '<span class="muted"> 无</span>' : `
       <ul class="handover-mini-list">
         ${faults.map(f => `<li><b>${esc(f.label)}</b> · ${esc(f.reported_by)}：${esc(f.reason)} · 影响 ${(f.affected_labels || []).map(esc).join('、')}</li>`).join('')}
+      </ul>`}
+    </div>
+    <div class="handover-subblock">
+      <b>活动预备口令（${preps.length}）</b>
+      ${preps.length === 0 ? '<span class="muted"> 无</span>' : `
+      <ul class="handover-mini-list">
+        ${preps.map(k => `<li><b>${esc(k.label)}</b> · ${k.status === 'ready' ? '✓ 已就绪（确认人 ' + esc(k.confirmed_by) + '）' : '待确认'} · 发令人 ${esc(k.issued_by)} · ${fmtTime(k.issued_at)}</li>`).join('')}
       </ul>`}
     </div>`;
 
@@ -809,6 +843,7 @@ function renderHandoverHistory(current, history) {
           const pendingCues = snap.pending_cues || [];
           const reqs = snap.pending_requests || [];
           const faults = snap.active_faults || [];
+          const preps = snap.active_prep_commands || [];
           return `
           <li>
             <div class="row">
@@ -819,13 +854,14 @@ function renderHandoverHistory(current, history) {
             </div>
             ${h.note ? `<div class="muted">说明：${esc(h.note)}</div>` : ''}
             <details class="handover-snap-details">
-              <summary class="muted">快照：已完成 ${doneCount}/${cueResults.length} · 未完成 ${pendingCues.length} · 复核申请 ${reqs.length} · 未解除故障 ${faults.length}（流水固定到第 ${snap.latest_event_id == null ? '0' : snap.latest_event_id} 条）</summary>
+              <summary class="muted">快照：已完成 ${doneCount}/${cueResults.length} · 未完成 ${pendingCues.length} · 复核申请 ${reqs.length} · 未解除故障 ${faults.length} · 活动预备口令 ${preps.length}（流水固定到第 ${snap.latest_event_id == null ? '0' : snap.latest_event_id} 条）</summary>
               ${pendingCues.length ? `
               <table class="hint-table" style="margin-top:6px">
                 <thead><tr><th style="width:90px">未完成编号</th><th>快照阻塞原因</th></tr></thead>
                 <tbody>${pendingCues.map(p => `<tr><td><b>${esc(p.label)}</b></td><td>${esc(p.reason_text)}</td></tr>`).join('')}</tbody>
               </table>` : '<p class="muted" style="margin:6px 0">快照时无未完成提示。</p>'}
               ${faults.length ? `<div class="muted" style="margin-top:4px">未解除故障：${faults.map(f => esc(f.label)).join('、')}</div>` : ''}
+              ${preps.length ? `<div class="muted" style="margin-top:2px">活动预备口令：${preps.map(k => esc(k.label) + '（' + (k.status === 'ready' ? '已就绪' : '待确认') + '）').join('、')}</div>` : ''}
               ${reqs.length ? `<div class="muted" style="margin-top:2px">复核申请：${reqs.map(q => esc(q.label) + '（' + REQUEST_STATUS_TEXT[q.status] + '）').join('、')}</div>` : ''}
             </details>
           </li>`;
@@ -993,6 +1029,8 @@ function renderClosingReport(closing) {
   const reviews = r.review_requests || [];
   const faults = r.faults || [];
   const handovers = r.handovers || [];
+  const preps = r.prep_commands || [];
+  const prepCounts = r.prep_counts || {};
   const done = finals.filter(f => f.final_status);
   return `
     <div class="panel closing-panel closed">
@@ -1021,7 +1059,7 @@ function renderClosingReport(closing) {
             ${finals.map(f => `
               <tr>
                 <td class="muted">${f.seq}</td>
-                <td><b>${esc(f.label)}</b>${f.needs_review ? ' <span class="badge review">复核</span>' : ''}</td>
+                <td><b>${esc(f.label)}</b>${f.needs_review ? ' <span class="badge review">复核</span>' : ''}${f.needs_prep ? ' <span class="badge prep-badge">预备</span>' : ''}</td>
                 <td>${f.final_status ? `<span class="status ${f.final_status}">${ACTION_TEXT(f.final_status)}</span>` : '<span class="muted">未完成</span>'}</td>
                 <td>${f.source === 'carried'
                   ? `<span class="badge carried" title="沿接续链追溯，非本场再次触发">承接</span>`
@@ -1060,7 +1098,21 @@ function renderClosingReport(closing) {
         <span class="muted">复核申请 ${reviews.length}（${reviews.map(x => REQUEST_STATUS_TEXT[x.status]).join('、') || '无'}）</span>
         <span class="muted">故障记录 ${faults.length}（未解除 ${faults.filter(f => f.status === 'active').length}）</span>
         <span class="muted">交接单 ${handovers.length}（已签收 ${handovers.filter(h => h.status === 'signed').length}）</span>
+        <span class="muted">预备口令 ${preps.length}（已消耗 ${prepCounts.consumed || 0} · 失效 ${prepCounts.invalidated || 0} · 重发作废 ${prepCounts.superseded || 0}）</span>
       </div>
+      ${preps.length ? `
+      <details class="handover-details">
+        <summary class="muted">预备口令历史（${preps.length} 条；发出 / 确认 / 消耗 / 重发作废 / 失效留痕）</summary>
+        <ul class="handover-mini-list">
+          ${preps.map(k => `
+            <li><span class="badge prep-${k.status}">${PREP_STATUS_TEXT_FE[k.status] || k.status}</span> <b>${esc(k.label)}</b>
+              <span class="muted"> · 发令 ${fmtTime(k.issued_at)} · ${esc(k.issued_by)}
+              ${k.confirmed_by ? ` · 确认 ${fmtTime(k.confirmed_at)} · ${esc(k.confirmed_by)}` : ''}
+              ${k.invalidated_reason ? ` · 失效：${PREP_REASON_TEXT_FE[k.invalidated_reason] || esc(k.invalidated_reason)}` : ''}
+              ${k.consumed_event_id ? ` · 消耗于流水 #${k.consumed_event_id}` : ''}</span>
+            </li>`).join('')}
+        </ul>
+      </details>` : ''}
     </div>`;
 }
 
@@ -1468,6 +1520,115 @@ async function doResolveFault(perfId, faultId) {
   renderPerformance(perfId);
 }
 
+/* ---------- 预备口令（发出 / 确认就绪 / 历史） ---------- */
+
+const PREP_STATUS_TEXT_FE = {
+  pending: '待确认', ready: '已就绪', consumed: '已消耗', superseded: '已被重新发出作废', invalidated: '已失效',
+};
+const PREP_REASON_TEXT_FE = {
+  dep_changed: '前置有效触发流水变化', fault: '受未解除故障影响',
+  cue_skipped: '提示已跳过', performance_continued: '演出已接续',
+};
+const prepUiState = new Map();
+function getPrepState(perfId) {
+  if (!prepUiState.has(perfId)) prepUiState.set(perfId, { open: true });
+  return prepUiState.get(perfId);
+}
+
+function drawPrepPanel(perfId, cues, prepList, readonly) {
+  const mount = document.getElementById('prep-panel-mount');
+  if (!mount) return;
+  const st = getPrepState(perfId);
+  const needPrepCues = cues.filter(c => c.needs_prep);
+  const active = prepList.filter(k => k.status === 'pending' || k.status === 'ready');
+  const history = prepList.filter(k => k.status === 'consumed' || k.status === 'superseded' || k.status === 'invalidated');
+
+  const activeHtml = active.length === 0
+    ? `<p class="muted" style="margin:6px 0 0">${needPrepCues.length ? '当前无待确认 / 已就绪口令。' : '本版本没有标记需预备的提示。'}</p>`
+    : `<ul class="prep-active-list">
+        ${active.map(k => `
+          <li class="prep-item ${k.status}">
+            <span class="badge ${k.status === 'ready' ? 'prep-ready-badge' : 'prep-pending-badge'}">${k.status === 'ready' ? '✓ 已就绪' : '预备待确认'}</span>
+            <b>${esc(k.label)}</b>
+            <span class="muted">${fmtTime(k.issued_at)} · 舞台监督 ${esc(k.issued_by)} 发令</span>
+            ${k.status === 'ready'
+              ? `<div class="muted">确认人 ${esc(k.confirmed_by)} · ${fmtTime(k.confirmed_at)}；口令不是触发，就绪后才可单项或成组触发</div>`
+              : `<div class="muted">等待发令人之外的另一操作人确认；确认时前置须均已有效触发且无故障影响</div>`}
+            ${k.status === 'pending' && !readonly
+              ? `<button class="small prep-confirm-btn" data-prep-act="confirm" data-cmd="${k.id}">确认就绪</button>` : ''}
+          </li>`).join('')}
+      </ul>`;
+
+  const historyHtml = history.length === 0 ? '' : `
+    <details class="prep-history">
+      <summary class="muted">口令历史（${history.length} 条；消耗 / 重发作废 / 失效均留痕）</summary>
+      <ul>
+        ${history.map(k => `
+          <li>
+            <span class="badge prep-${k.status}">${PREP_STATUS_TEXT_FE[k.status] || k.status}</span>
+            <b>${esc(k.label)}</b><br>
+            <span class="muted">
+              发令 ${fmtTime(k.issued_at)} · ${esc(k.issued_by)}
+              ${k.confirmed_by ? ` · 确认 ${fmtTime(k.confirmed_at)} · ${esc(k.confirmed_by)}` : ''}
+              ${k.invalidated_reason ? `<br>失效原因：${PREP_REASON_TEXT_FE[k.invalidated_reason] || k.invalidated_reason}${k.invalidated_detail ? '（' + esc(k.invalidated_detail) + '）' : ''}` : ''}
+            </span>
+          </li>`).join('')}
+      </ul>
+    </details>`;
+
+  mount.innerHTML = `
+    <div class="panel prep-panel${active.length ? '' : ' collapsed'}">
+      <div class="row">
+        <b>📢 预备口令（warning / standby）</b>
+        <span class="muted">舞台监督对需预备提示发口令，另一操作人确认就绪后才可触发；口令不算触发。前置流水变化或受故障影响即失效（解除故障不自动恢复），触发 / 跳过消耗口令，撤回后再触发须重新预备</span>
+        <span class="grow"></span>
+        <span class="muted">待确认 ${active.filter(k=>k.status==='pending').length} · 已就绪 ${active.filter(k=>k.status==='ready').length}</span>
+        <button class="ghost small" id="prep-toggle">${st.open ? '收起' : '展开'}</button>
+      </div>
+      ${st.open ? `
+      ${readonly ? '<p class="muted">只读 / 已封场演出：预备口令历史可回看，不能发出或确认。接续演出不承接预备状态。</p>' : ''}
+      <div class="prep-active-wrap" style="margin-top:10px">${activeHtml}</div>
+      ${needPrepCues.length ? `
+      <div class="muted" style="margin-top:8px">需预备提示：
+        ${needPrepCues.map(c => `<span class="hint-flag flag-prep">${esc(c.label)}</span>`).join(' ')}
+        <span class="muted">（也可直接点提示卡片上的「发预备口令」）</span>
+      </div>` : ''}
+      ${historyHtml}` : ''}
+    </div>`;
+
+  document.getElementById('prep-toggle').onclick = () => { st.open = !st.open; drawPrepPanel(perfId, cues, prepList, readonly); };
+  if (readonly || !st.open) return;
+  mount.querySelectorAll('.prep-confirm-btn').forEach(btn => {
+    btn.onclick = () => doConfirmPrep(perfId, Number(btn.dataset.cmd));
+  });
+}
+
+async function doIssuePrep(perfId, cueId, label) {
+  const issuedBy = getOperator();
+  if (!issuedBy) { toast('请先填写发令人（顶部操作人输入框，填舞台监督姓名）', true); return document.getElementById('operator-input').focus(); }
+  try {
+    const r = await api(`/api/performances/${perfId}/cues/${cueId}/prep-commands`, {
+      method: 'POST', body: { issued_by: issuedBy },
+    });
+    toast(r.superseded_command_id ? `已重新发出「${label}」预备口令，旧口令已作废（待另一操作人确认）` : `已发出「${label}」预备口令，等待另一操作人确认就绪`);
+  } catch (e) { toast(e.message, true); }
+  stopPolling();
+  renderPerformance(perfId);
+}
+
+async function doConfirmPrep(perfId, cmdId) {
+  const operator = getOperator();
+  if (!operator) { toast('请先填写确认操作人（须与发令人不同）', true); return document.getElementById('operator-input').focus(); }
+  try {
+    await api(`/api/performances/${perfId}/prep-commands/${cmdId}/confirm`, {
+      method: 'POST', body: { operator },
+    });
+    toast('已确认就绪，该提示现在可以触发');
+  } catch (e) { toast(e.message, true); }
+  stopPolling();
+  renderPerformance(perfId);
+}
+
 /* ---------- 接续关系横幅与接续面板 ---------- */
 
 function renderContinuationBanner(perf, continuation, carriedCount) {
@@ -1664,6 +1825,15 @@ function cueCard(perfId, c, readonly) {
   const reviewHtml = req
     ? `<div class="cue-event"><span class="review-pending-text">待复核：${esc(req.requested_by)} 于 ${fmtTime(req.requested_at)} 申请触发，需另一操作人确认</span></div>`
     : '';
+  // 预备口令状态展示：待确认 / 已就绪；失效、消耗等历史在预备面板回看
+  const prep = c.prep_command;
+  const prepHtml = c.needs_prep
+    ? (prep
+      ? (prep.status === 'ready'
+        ? `<div class="cue-event"><span class="prep-ready-text">✓ 预备已就绪：${esc(prep.issued_by)} 发令 · ${esc(prep.confirmed_by)} 于 ${fmtTime(prep.confirmed_at)} 确认，可触发</span></div>`
+        : `<div class="cue-event"><span class="prep-pending-text">预备待确认：${esc(prep.issued_by)} 发令（${fmtTime(prep.issued_at)}），等待另一操作人确认就绪</span></div>`)
+      : `<div class="cue-event"><span class="prep-none-text">需预备确认：尚未就绪，触发前请先发预备口令并经另一操作人确认</span></div>`)
+    : '';
   const ownFault = c.own_fault;
   const faultSources = c.fault_blocked || [];
   const faultHit = faultSources.length > 0;
@@ -1675,15 +1845,24 @@ function cueCard(perfId, c, readonly) {
   const canAct = !readonly && c.status === 'pending' && !req && !faultHit;
   const done = c.status === 'fired' || c.status === 'skipped';
   const canRetract = !readonly && c.status === 'fired';
+  // 需预备提示：仅当存在 ready 口令时允许点触发（申请触发同此门控，服务端仍会强制判定）
+  const prepReady = !!(c.needs_prep && prep && prep.status === 'ready');
+  const fireEnabled = (!c.needs_prep || prepReady) && canAct;
+  // 发预备口令：需预备、无有效结果、演出可写（待确认 / 已就绪时按钮变为"重新发出"语义，旧口令作废留痕）
+  const canIssuePrep = !readonly && c.needs_prep && !done;
   const fireLabel = c.needs_review ? '申请触发' : '触发';
+  const prepLabel = prep ? '重新发口令' : '发预备口令';
   return `
-    <div class="cue-card ${c.status}${faultHit ? ' fault-hit' : ''}">
+    <div class="cue-card ${c.status}${faultHit ? ' fault-hit' : ''}${c.needs_prep ? ' prep-cue' : ''}">
       <div class="cue-seq">${c.seq}</div>
       <div class="cue-main">
         <div class="cue-title">
           <span class="cue-label">${esc(c.label)}</span>
           <span class="cue-type">${TYPE_TEXT[c.type] || c.type}</span>
           ${c.needs_review ? '<span class="badge review">双人复核</span>' : ''}
+          ${c.needs_prep ? '<span class="badge prep-badge">需预备</span>' : ''}
+          ${prep && prep.status === 'ready' ? '<span class="badge prep-ready-badge">✓ 已就绪</span>' : ''}
+          ${prep && prep.status === 'pending' ? '<span class="badge prep-pending-badge">预备待确认</span>' : ''}
           ${c.event && c.event.source === 'carried' ? '<span class="badge carried">承接</span>' : ''}
           ${ownFault ? '<span class="badge fault-badge">⚠ 设备故障</span>' : (faultHit ? '<span class="badge fault-affected-badge">触发冻结</span>' : '')}
           <span class="status ${c.status}">${STATUS_TEXT[c.status]}</span>
@@ -1693,10 +1872,12 @@ function cueCard(perfId, c, readonly) {
         ${blockedHtml}
         ${faultHtml}
         ${reviewHtml}
+        ${prepHtml}
         ${eventHtml}
       </div>
       <div class="cue-actions">
-        <button id="fire-${c.id}" ${canAct ? '' : 'disabled'}>${fireLabel}</button>
+        <button id="fire-${c.id}" ${fireEnabled ? '' : 'disabled'} title="${c.needs_prep && !prepReady ? '需先发预备口令并由另一操作人确认就绪' : ''}">${fireLabel}</button>
+        <button id="prep-${c.id}" class="ghost prep-btn" ${canIssuePrep ? '' : 'disabled'} title="舞台监督发出预备口令（重新发出会使旧口令作废并留痕）">${prepLabel}</button>
         <button id="skip-${c.id}" class="ghost" ${(!readonly && !done && !req) ? '' : 'disabled'}>跳过</button>
         <button id="retract-${c.id}" class="danger" ${canRetract ? '' : 'disabled'}>撤回</button>
         <button id="fault-${c.id}" class="ghost fault-btn" ${(!readonly && !ownFault) ? '' : 'disabled'} title="登记现场设备故障">⚠ 登记故障</button>

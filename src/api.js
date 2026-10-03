@@ -10,6 +10,8 @@
  *       封场被阻项保持可操作、重复封场）
  *   422 校验未通过（缺失引用/循环依赖）、前置未触发（受阻，含复核确认时前置失效）
  *       或受未解除设备故障影响（触发 / 复核确认被冻结，附 blocked_by_faults，申请保持待复核）；
+ *       需预备提示在未发口令 / 口令待确认 / 就绪已失效（前置流水变化或故障）时触发、成组触发
+ *       或双人复核确认同样 422（附 needs_prep / prep_status，不改任何数据）；
  *       封场前核对存在阻项（未完成提示 / 待复核申请 / 未解除故障 / 待签收交接单）
  */
 const { db, withTx } = require('./db');
@@ -27,6 +29,20 @@ class HttpError extends Error {
 
 const ACTION_TEXT = { fired: '已触发', skipped: '已跳过', retracted: '已撤回' };
 const REQUEST_STATUS_TEXT = { pending: '待复核', confirmed: '已确认', cancelled: '已撤销', rejected: '已驳回' };
+// 预备口令状态与就绪失效原因（执行台 / 交接 / 封场报告展示用）
+const PREP_STATUS_TEXT = {
+  pending: '待确认',
+  ready: '已就绪',
+  consumed: '已消耗',
+  superseded: '已被重新发出作废',
+  invalidated: '已失效',
+};
+const PREP_INVALID_REASON_TEXT = {
+  dep_changed: '前置有效触发流水变化',
+  fault: '受未解除故障影响',
+  cue_skipped: '提示已跳过',
+  performance_continued: '演出已接续',
+};
 // 接续核对提示标记：触发 / 跳过 / 撤回流水、复核申请、承接结果
 const HINT_FLAG_TEXT = {
   fired: '有触发流水',
@@ -44,6 +60,7 @@ function sanitizeCue(raw) {
     description: String((raw && raw.description) != null ? raw.description : '').trim().slice(0, 500),
     deps: [...new Set(deps.map((d) => String(d).trim()).filter(Boolean))].slice(0, 50),
     needs_review: raw && raw.needs_review ? 1 : 0,
+    needs_prep: raw && raw.needs_prep ? 1 : 0,
   };
 }
 
@@ -248,6 +265,181 @@ function faultBrief(f) {
   };
 }
 
+/* ---- 预备口令（warning/standby）：发出 / 确认 / 就绪失效扫描 / 消耗 ---- */
+
+/** 某提示当前活动口令（pending 或 ready），无则 null。须在事务内调用 */
+function activePrepFor(performanceId, cueId) {
+  return db.prepare(`
+    SELECT * FROM cue_prep_commands
+    WHERE performance_id = ? AND cue_id = ? AND status IN ('pending','ready')
+    ORDER BY id DESC LIMIT 1
+  `).get(performanceId, cueId) || null;
+}
+
+/** 该演出全部活动口令（pending/ready），附编号与序号 */
+function activePrepRows(performanceId) {
+  return db.prepare(`
+    SELECT k.*, c.label AS label, c.seq AS seq FROM cue_prep_commands k
+    JOIN cues c ON c.id = k.cue_id
+    WHERE k.performance_id = ? AND k.status IN ('pending','ready')
+    ORDER BY k.id
+  `).all(performanceId);
+}
+
+/** 该演出全部预备口令（最新在前），附编号与序号（交接 / 封场回看留痕） */
+function allPrepRows(performanceId) {
+  return db.prepare(`
+    SELECT k.*, c.label AS label, c.seq AS seq FROM cue_prep_commands k
+    JOIN cues c ON c.id = k.cue_id
+    WHERE k.performance_id = ? ORDER BY k.id DESC
+  `).all(performanceId);
+}
+
+/** 预备口令对外结构（快照解析为对象） */
+function presentPrep(row) {
+  let snapshot = null;
+  if (row.dep_event_snapshot) {
+    try { snapshot = JSON.parse(row.dep_event_snapshot); } catch { snapshot = null; }
+  }
+  return {
+    id: row.id,
+    performance_id: row.performance_id,
+    cue_id: row.cue_id,
+    ...(row.label ? { label: row.label, seq: row.seq } : {}),
+    status: row.status,
+    status_text: PREP_STATUS_TEXT[row.status] || row.status,
+    issued_by: row.issued_by,
+    issued_at: row.issued_at,
+    confirmed_by: row.confirmed_by || null,
+    confirmed_at: row.confirmed_at || null,
+    dep_event_snapshot: snapshot,
+    superseded_by_command_id: row.superseded_by_command_id || null,
+    invalidated_reason: row.invalidated_reason || null,
+    invalidated_reason_text: row.invalidated_reason ? (PREP_INVALID_REASON_TEXT[row.invalidated_reason] || row.invalidated_reason) : null,
+    invalidated_detail: row.invalidated_detail || null,
+    consumed_event_id: row.consumed_event_id || null,
+    invalidated_at: row.invalidated_at || null,
+  };
+}
+
+/** 触发被"未预备"阻断时的统一错误（422；不改任何数据） */
+function prepNotReadyError(cue, command, detail) {
+  if (!command) {
+    return new HttpError(
+      422,
+      `提示「${cue.label}」需预备确认：尚未发出预备口令，请先由舞台监督发出预备口令并经另一操作人确认就绪后再触发`,
+      { needs_prep: true, prep_status: 'none' }
+    );
+  }
+  if (command.status === 'pending') {
+    return new HttpError(
+      422,
+      `提示「${cue.label}」的预备口令尚待确认（发令人 ${command.issued_by}，时间 ${command.issued_at}），须由另一操作人确认就绪后方可触发`,
+      { needs_prep: true, prep_status: 'pending', prep_command: presentPrep(command) }
+    );
+  }
+  // ready 但判定瞬间已失效（扫描尚未运行或并发窗口）：给出明确原因
+  return new HttpError(
+    422,
+    detail || `提示「${cue.label}」的预备口令已不再满足就绪条件，请重新发出预备口令并确认就绪后再触发`,
+    { needs_prep: true, prep_status: 'stale', prep_command: presentPrep(command) }
+  );
+}
+
+/**
+ * 就绪口令当前是否仍满足就绪条件：
+ *  1) 每个前置的"当前有效结果为已触发"，且其最新 fired 事件 id 与确认时固定的快照一致；
+ *  2) 该提示当前不受任何未解除故障影响（含故障编号本身）。
+ * @param {object} cue 提示（含 label/deps）
+ * @param {object} cmd ready 口令（dep_event_snapshot 为 JSON 文本）
+ * @param {Map} firedEventIdByLabel label -> 当前有效 fired 事件 id（null 表示未有效触发）
+ * @param {object} faultImpactNow faultImpact 结果
+ * @returns {{ok:true}|{ok:false,reason:'dep_changed'|'fault', detail:string, labels:string[]}}
+ */
+function checkReadyStillValid(cue, cmd, firedEventIdByLabel, faultImpactNow) {
+  let snapshot;
+  try { snapshot = JSON.parse(cmd.dep_event_snapshot || '{}'); } catch { snapshot = {}; }
+  const changedLabels = [];
+  const unmetLabels = [];
+  for (const dep of cue.deps) {
+    const curId = firedEventIdByLabel.get(dep) ?? null;
+    if (curId == null) unmetLabels.push(dep);
+    if (curId !== (Object.prototype.hasOwnProperty.call(snapshot, dep) ? snapshot[dep] : null)) {
+      changedLabels.push(dep);
+    }
+  }
+  if (unmetLabels.length || changedLabels.length) {
+    const parts = [];
+    if (unmetLabels.length) parts.push(`前置不再处于有效已触发：${unmetLabels.join('、')}`);
+    if (changedLabels.length) parts.push(`前置有效触发流水已变化：${changedLabels.join('、')}`);
+    return { ok: false, reason: 'dep_changed', detail: parts.join('；'), labels: [...new Set([...unmetLabels, ...changedLabels])] };
+  }
+  if ((faultImpactNow.blockedByLabel.get(cue.label) || []).length) {
+    return {
+      ok: false,
+      reason: 'fault',
+      detail: `提示「${cue.label}」受未解除故障影响：${[...new Set((faultImpactNow.blockedByLabel.get(cue.label) || []).map((f) => f.label))].join('、')}`,
+      labels: [cue.label],
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * 就绪失效扫描（须在写事务内、任何流水 / 故障写入之后调用）：
+ * 遍历该演出全部 ready 口令，凡前置有效触发流水相对确认时快照发生变化
+ * （含前置被撤回 / 跳过导致不再有效）或当前受未解除故障影响的，置 invalidated 并留痕。
+ * pending（待确认）口令不因此失效——确认时会重新判定。解除故障不触发自动恢复。
+ * 返回本次失效的口令清单（presentPrep）。
+ */
+function sweepPrepReadiness(performanceId, versionId) {
+  const cues = getVersionCues(versionId);
+  const byLabel = new Map(cues.map((c) => [c.label, c]));
+  const latestByCue = latestEventsByCue(performanceId);
+  const firedEventIdByLabel = new Map();
+  for (const c of cues) {
+    const e = latestByCue.get(c.id);
+    firedEventIdByLabel.set(c.label, e && e.action === 'fired' ? e.id : null);
+  }
+  const impactNow = faultImpact(cues, activeFaultRows(performanceId));
+
+  const invalidated = [];
+  for (const cmd of activePrepRows(performanceId)) {
+    if (cmd.status !== 'ready') continue;
+    const cue = byLabel.get(cmd.label);
+    if (!cue) continue;
+    const check = checkReadyStillValid(cue, cmd, firedEventIdByLabel, impactNow);
+    if (check.ok) continue;
+    db.prepare(`
+      UPDATE cue_prep_commands SET status = 'invalidated', invalidated_reason = ?,
+        invalidated_detail = ?, invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE id = ? AND status = 'ready'
+    `).run(check.reason, check.detail, cmd.id);
+    invalidated.push(presentPrep(db.prepare(`
+      SELECT k.*, c.label AS label, c.seq AS seq FROM cue_prep_commands k
+      JOIN cues c ON c.id = k.cue_id WHERE k.id = ?
+    `).get(cmd.id)));
+  }
+  return invalidated;
+}
+
+/** 口令被消耗（触发 / 跳过导致）：ready → consumed，关联消耗它的流水 */
+function markPrepConsumed(commandId, eventId) {
+  db.prepare(`
+    UPDATE cue_prep_commands SET status = 'consumed', consumed_event_id = ?
+    WHERE id = ? AND status IN ('pending','ready')
+  `).run(eventId, commandId);
+}
+
+/** 活动口令作废：pending/ready → invalidated（附原因与说明） */
+function markPrepInvalidated(commandId, reason, detail) {
+  db.prepare(`
+    UPDATE cue_prep_commands SET status = 'invalidated', invalidated_reason = ?,
+      invalidated_detail = ?, invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE id = ? AND status IN ('pending','ready')
+  `).run(reason, detail || null, commandId);
+}
+
 /* ---------------- 路由表 ---------------- */
 
 const routes = [];
@@ -318,8 +510,8 @@ route('POST', '/api/shows/:id/versions', (body, p) => {
     const newId = Number(info.lastInsertRowid);
     if (base) {
       const cues = db.prepare('SELECT * FROM cues WHERE version_id = ? ORDER BY seq').all(base.id);
-      const ins = db.prepare('INSERT INTO cues (version_id, seq, label, type, description, deps, needs_review) VALUES (?,?,?,?,?,?,?)');
-      for (const c of cues) ins.run(newId, c.seq, c.label, c.type, c.description, c.deps, c.needs_review);
+      const ins = db.prepare('INSERT INTO cues (version_id, seq, label, type, description, deps, needs_review, needs_prep) VALUES (?,?,?,?,?,?,?,?)');
+      for (const c of cues) ins.run(newId, c.seq, c.label, c.type, c.description, c.deps, c.needs_review, c.needs_prep);
     }
     return { version: getVersion(newId), cues: getVersionCues(newId) };
   });
@@ -341,8 +533,8 @@ route('PUT', '/api/versions/:id/cues', (body, p) => {
   const cues = body.cues.map(sanitizeCue);
   withTx(() => {
     db.prepare('DELETE FROM cues WHERE version_id = ?').run(version.id);
-    const ins = db.prepare('INSERT INTO cues (version_id, seq, label, type, description, deps, needs_review) VALUES (?,?,?,?,?,?,?)');
-    cues.forEach((c, i) => ins.run(version.id, i + 1, c.label, c.type, c.description, JSON.stringify(c.deps), c.needs_review));
+    const ins = db.prepare('INSERT INTO cues (version_id, seq, label, type, description, deps, needs_review, needs_prep) VALUES (?,?,?,?,?,?,?,?)');
+    cues.forEach((c, i) => ins.run(version.id, i + 1, c.label, c.type, c.description, JSON.stringify(c.deps), c.needs_review, c.needs_prep));
   });
   // 草稿允许暂存不完整内容，同时返回校验结果供界面提示
   return { ok: true, errors: validateCues(cues), cues: getVersionCues(version.id) };
@@ -502,6 +694,17 @@ route('GET', '/api/performances/:id', (body, p) => {
     };
   });
 
+  // 预备口令：每个需预备提示挂上当前活动口令（pending/ready）；
+  // 顶层给出全部口令历史（最新在上）与活动口令计数。口令本身不是触发，不改变提示状态。
+  const prepCommands = allPrepRows(perf.id).map(presentPrep);
+  const activePrepByCue = new Map();
+  for (const k of prepCommands) {
+    if ((k.status === 'pending' || k.status === 'ready') && !activePrepByCue.has(k.cue_id)) {
+      activePrepByCue.set(k.cue_id, k);
+    }
+  }
+  for (const c of cueStates) c.prep_command = activePrepByCue.get(c.id) || null;
+
   // 现场换班交接：当前待签收交接单（附按最新状态实时计算的差异）与全部交接历史
   // （已签收为不可变历史；被重提替换 / 接续作废旧单同样留痕）
   const pendingHandover = pendingHandoverRow(perf.id);
@@ -522,6 +725,8 @@ route('GET', '/api/performances/:id', (body, p) => {
     review_requests: reviewRequests,
     faults,
     active_fault_count: activeFaults.length,
+    prep_commands: prepCommands,
+    active_prep_count: activePrepByCue.size,
     handover,
     handover_history,
     closing,
@@ -550,8 +755,9 @@ function recordEvent(performanceId, cueId, action, operator, reason) {
 
     // 未解除的设备故障：受影响提示（故障编号本身及沿前置关系依赖它的后续提示）不得触发。
     // 跳过（skipped）不受故障影响，仍按原有规则执行。
+    let impact = null;
     if (action === 'fired') {
-      const impact = faultImpact(getVersionCues(perf.version_id), activeFaultRows(performanceId));
+      impact = faultImpact(getVersionCues(perf.version_id), activeFaultRows(performanceId));
       const sources = impact.blockedByLabel.get(cue.label) || [];
       if (sources.length) throw faultBlockedError(sources);
     }
@@ -566,12 +772,43 @@ function recordEvent(performanceId, cueId, action, operator, reason) {
           throw new HttpError(422, `前置提示未触发，无法触发：${unmet.join('、')}`, { unmet });
         }
       }
+      // 需预备提示：仅当存在"已就绪"口令才可触发（口令本身不是触发，不能满足下游前置）。
+      // 确认就绪后若前置流水变化或出现故障，扫描已将其置为失效；此处再按快照重查一遍（防御并发）。
+      if (cue.needs_prep) {
+        const prep = activePrepFor(performanceId, cueId);
+        if (!prep || prep.status !== 'ready') throw prepNotReadyError(cue, prep);
+        const cuesNow = getVersionCues(perf.version_id);
+        const firedEventIdByLabel = new Map();
+        for (const c of cuesNow) {
+          const e = latestByCue.get(c.id);
+          firedEventIdByLabel.set(c.label, e && e.action === 'fired' ? e.id : null);
+        }
+        const check = checkReadyStillValid({ ...cue, deps }, prep, firedEventIdByLabel, impact);
+        if (!check.ok) throw prepNotReadyError(cue, prep, `预备口令已失效（${PREP_INVALID_REASON_TEXT[check.reason]}：${check.detail}），请重新预备`);
+      }
     }
 
     const info = db.prepare(
       'INSERT INTO cue_events (performance_id, cue_id, action, operator, reason) VALUES (?,?,?,?,?)'
     ).run(performanceId, cueId, action, operator, reason);
-    return { event: db.prepare('SELECT * FROM cue_events WHERE id = ?').get(Number(info.lastInsertRowid)) };
+    const eventId = Number(info.lastInsertRowid);
+
+    // 跳过或触发消耗预备口令：触发须 ready（上方已保证）→ consumed 并关联触发流水；
+    // 跳过不要求先就绪——ready 口令同样 consumed，pending（待确认）口令置 invalidated(cue_skipped)。
+    const prep = activePrepFor(performanceId, cueId);
+    if (prep) {
+      if (prep.status === 'ready') {
+        markPrepConsumed(prep.id, eventId);
+      } else if (action === 'skipped') {
+        markPrepInvalidated(prep.id, 'cue_skipped', `提示「${cue.label}」已跳过（操作人 ${operator}，时间见跳过流水 #${eventId}）`);
+      }
+    }
+
+    // 本次流水可能改变某提示的"前置有效触发流水"：扫描其余已就绪口令，失效项独立留痕。
+    const invalidatedPrep = sweepPrepReadiness(performanceId, perf.version_id);
+
+    const event = db.prepare('SELECT * FROM cue_events WHERE id = ?').get(eventId);
+    return { event, ...(invalidatedPrep.length ? { invalidated_prep: invalidatedPrep } : {}) };
   });
 }
 
@@ -641,7 +878,126 @@ function retractEvent(performanceId, cueId, operator, reason) {
     const info = db.prepare(
       'INSERT INTO cue_events (performance_id, cue_id, action, operator, reason) VALUES (?,?,?,?,?)'
     ).run(performanceId, cueId, 'retracted', operator, reason);
-    return { event: db.prepare('SELECT * FROM cue_events WHERE id = ?').get(Number(info.lastInsertRowid)) };
+    // 撤回改变前置的有效触发流水：以该提示（及其上游）为前置的就绪口令立即失效（解除 / 重发不自动恢复）
+    const invalidatedPrep = sweepPrepReadiness(performanceId, perf.version_id);
+    const event = db.prepare('SELECT * FROM cue_events WHERE id = ?').get(Number(info.lastInsertRowid));
+    return { event, ...(invalidatedPrep.length ? { invalidated_prep: invalidatedPrep } : {}) };
+  });
+}
+
+/* ---- 预备口令：发出 / 确认 ---- */
+
+/**
+ * 发出预备口令：舞台监督填写本人姓名（issued_by）。仅需预备（needs_prep）且当前无有效结果
+ * 的提示可发；只读 / 封场演出拒绝。同一提示同时至多一条活动口令：重新发出时旧活动口令
+ * 置 superseded（全量留痕）后写入新的待确认口令。口令本身不是触发。
+ */
+function issuePrepCommand(performanceId, cueId, issuedBy) {
+  return withTx(() => {
+    const { cue } = getPerfCue(performanceId, cueId);
+    if (!cue.needs_prep) {
+      throw new HttpError(400, `提示「${cue.label}」未标记需预备确认，可直接按既有规则触发`);
+    }
+
+    const latestByCue = latestEventsByCue(performanceId);
+    if (effectiveAction(latestByCue.get(cueId) || null)) {
+      throw conflictError(latestByCue.get(cueId));
+    }
+
+    const existing = activePrepFor(performanceId, cueId);
+    let supersededId = null;
+    if (existing) {
+      db.prepare(`
+        UPDATE cue_prep_commands SET status = 'superseded',
+          invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id = ? AND status IN ('pending','ready')
+      `).run(existing.id);
+      supersededId = existing.id;
+    }
+
+    const info = db.prepare(
+      'INSERT INTO cue_prep_commands (performance_id, cue_id, issued_by) VALUES (?,?,?)'
+    ).run(performanceId, cueId, issuedBy);
+    const newId = Number(info.lastInsertRowid);
+    if (supersededId) {
+      db.prepare('UPDATE cue_prep_commands SET superseded_by_command_id = ? WHERE id = ?').run(newId, supersededId);
+    }
+    return {
+      command: presentPrep(db.prepare('SELECT * FROM cue_prep_commands WHERE id = ?').get(newId)),
+      superseded_command_id: supersededId,
+    };
+  });
+}
+
+/**
+ * 确认预备口令：须由发令人之外的另一操作人执行；确认瞬间重查——
+ * 提示仍无有效结果、前置当前均已有效触发（并固定各自 fired 流水 id 快照）、无未解除故障影响，
+ * 口令才置为 ready。任一不满足返回 422，口令保持待确认（可稍后重新确认；不自动失败）。
+ */
+function confirmPrepCommand(performanceId, commandId, operator) {
+  return withTx(() => {
+    const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(performanceId);
+    if (!perf) throw new HttpError(404, '演出不存在');
+    assertActiveInTx(perf);
+
+    const cmd = db.prepare(
+      'SELECT * FROM cue_prep_commands WHERE id = ? AND performance_id = ?'
+    ).get(commandId, performanceId);
+    if (!cmd) throw new HttpError(404, '预备口令不存在');
+    if (cmd.status !== 'pending') {
+      throw new HttpError(
+        409,
+        `该预备口令已处置：${PREP_STATUS_TEXT[cmd.status]}（发令人 ${cmd.issued_by}）；请重新发出预备口令`,
+        { command: presentPrep(cmd) }
+      );
+    }
+    if (cmd.issued_by === operator) {
+      throw new HttpError(409, '预备口令确认人不能与发令人相同，须由另一操作人确认', { command: presentPrep(cmd) });
+    }
+
+    const cue = db.prepare('SELECT * FROM cues WHERE id = ? AND version_id = ?').get(cmd.cue_id, perf.version_id);
+    if (!cue) throw new HttpError(404, '该提示不属于此演出使用的版本');
+
+    const latestByCue = latestEventsByCue(performanceId);
+    if (effectiveAction(latestByCue.get(cue.id) || null)) {
+      throw conflictError(latestByCue.get(cue.id));
+    }
+
+    const deps = JSON.parse(cue.deps);
+    const cues = getVersionCues(perf.version_id);
+    const firedEventIdByLabel = new Map();
+    for (const c of cues) {
+      const e = latestByCue.get(c.id);
+      firedEventIdByLabel.set(c.label, e && e.action === 'fired' ? e.id : null);
+    }
+    const unmet = deps.filter((d) => firedEventIdByLabel.get(d) == null);
+    if (unmet.length) {
+      throw new HttpError(
+        422,
+        `前置提示未全部有效触发，预备口令保持待确认：${unmet.join('、')}`,
+        { unmet, command: presentPrep(cmd) }
+      );
+    }
+    const impact = faultImpact(cues, activeFaultRows(performanceId));
+    const faultSources = impact.blockedByLabel.get(cue.label) || [];
+    if (faultSources.length) {
+      throw new HttpError(
+        422,
+        `该提示受未解除的设备故障影响，故障解除前预备口令不能确认就绪（口令保持待确认）：${
+          faultSources.map((f) => `「${f.label}」（${f.reason}）`).join('、')}`,
+        { blocked_by_faults: faultSources.map(faultBrief), command: presentPrep(cmd) }
+      );
+    }
+
+    // 固定确认瞬间各前置的有效 fired 流水 id：之后任一前置的有效流水变化即判定就绪失效
+    const snapshot = {};
+    for (const d of deps) snapshot[d] = firedEventIdByLabel.get(d);
+
+    db.prepare(`
+      UPDATE cue_prep_commands SET status = 'ready', confirmed_by = ?, confirmed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+        dep_event_snapshot = ? WHERE id = ? AND status = 'pending'
+    `).run(operator, JSON.stringify(snapshot), cmd.id);
+    return { command: presentPrep(db.prepare('SELECT * FROM cue_prep_commands WHERE id = ?').get(cmd.id)) };
   });
 }
 
@@ -725,6 +1081,8 @@ function confirmReviewRequest(performanceId, requestId, operator) {
 
     // 前置失效（未触发或已撤回）时拒绝确认，申请保持待复核
     const deps = JSON.parse(cue.deps);
+    let cuesVersion = null;
+    let firedEventIdByLabel = null;
     if (deps.length) {
       const fired = firedLabelSet(perf.version_id, latestByCue);
       const unmet = deps.filter((d) => !fired.has(d));
@@ -733,16 +1091,52 @@ function confirmReviewRequest(performanceId, requestId, operator) {
       }
     }
 
+    // 双人复核确认也须重查预备：同时标记需预备的提示，仅当预备口令已就绪才可确认触发
+    if (cue.needs_prep) {
+      cuesVersion = getVersionCues(perf.version_id);
+      firedEventIdByLabel = new Map();
+      for (const c of cuesVersion) {
+        const e = latestByCue.get(c.id);
+        firedEventIdByLabel.set(c.label, e && e.action === 'fired' ? e.id : null);
+      }
+      const prep = activePrepFor(performanceId, req.cue_id);
+      if (!prep || prep.status !== 'ready') {
+        throw new HttpError(
+          422,
+          prep
+            ? `提示「${cue.label}」的预备口令尚待确认（发令人 ${prep.issued_by}），预备就绪前复核确认不能触发，申请保持待复核`
+            : `提示「${cue.label}」需预备确认，请先发预备口令并确认就绪后再复核确认，申请保持待复核`,
+          { needs_prep: true, prep_status: prep ? prep.status : 'none', request: req }
+        );
+      }
+      const checkPrep = checkReadyStillValid({ ...cue, deps }, prep, firedEventIdByLabel, impact);
+      if (!checkPrep.ok) {
+        throw new HttpError(
+          422,
+          `预备口令已失效（${PREP_INVALID_REASON_TEXT[checkPrep.reason]}：${checkPrep.detail}），请重新预备后再复核确认，申请保持待复核`,
+          { needs_prep: true, prep_status: 'invalidated', request: req }
+        );
+      }
+    }
+
     const evInfo = db.prepare(
       'INSERT INTO cue_events (performance_id, cue_id, action, operator, reason) VALUES (?,?,?,?,?)'
     ).run(performanceId, req.cue_id, 'fired', operator, `双人复核确认（申请人：${req.requested_by}）`);
     const eventId = Number(evInfo.lastInsertRowid);
+    // 复核确认触发同样消耗就绪口令
+    if (cue.needs_prep) {
+      const prep = activePrepFor(performanceId, req.cue_id);
+      if (prep) markPrepConsumed(prep.id, eventId);
+    }
+    // 本次触发可能改变下游的前置流水：扫描其余就绪口令
+    const invalidatedPrep = sweepPrepReadiness(performanceId, perf.version_id);
     db.prepare(
       "UPDATE cue_review_requests SET status = 'confirmed', resolved_by = ?, resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), event_id = ? WHERE id = ?"
     ).run(operator, eventId, req.id);
     return {
       request: db.prepare('SELECT * FROM cue_review_requests WHERE id = ?').get(req.id),
       event: db.prepare('SELECT * FROM cue_events WHERE id = ?').get(eventId),
+      ...(invalidatedPrep.length ? { invalidated_prep: invalidatedPrep } : {}),
     };
   });
 }
@@ -821,6 +1215,21 @@ route('POST', '/api/performances/:id/review-requests/:reqId/reject', (body, p) =
   return rejectReviewRequest(Number(p.id), Number(p.reqId), operator, reason);
 });
 
+/* ---- 预备口令（需预备提示：发出 → 另一操作人确认就绪 → 才可触发） ---- */
+
+route('POST', '/api/performances/:id/cues/:cueId/prep-commands', (body, p) => {
+  // 兼容 issued_by（舞台监督发令人）与 operator 两种字段
+  const issuedBy = String(body.issued_by || body.operator || '').trim().slice(0, 50);
+  if (!issuedBy) throw new HttpError(400, '请填写发令的舞台监督姓名');
+  return issuePrepCommand(Number(p.id), Number(p.cueId), issuedBy);
+});
+
+route('POST', '/api/performances/:id/prep-commands/:cmdId/confirm', (body, p) => {
+  const operator = String(body.operator || body.confirmed_by || '').trim().slice(0, 50);
+  if (!operator) throw new HttpError(400, '请填写确认操作人');
+  return confirmPrepCommand(Number(p.id), Number(p.cmdId), operator);
+});
+
 route('POST', '/api/performances/:id/cues/:cueId/skip', (body, p) => {
   const operator = String(body.operator || '').trim().slice(0, 50);
   if (!operator) throw new HttpError(400, '请填写操作人');
@@ -867,14 +1276,19 @@ function registerFault(performanceId, cueId, operator, reason) {
     ).run(performanceId, cueId, operator, reason);
     const faultId = Number(info.lastInsertRowid);
 
-    // 事务内按最新状态计算影响范围（故障提示本身 + 所有依赖它的后续提示）
     const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(performanceId);
+
+    // 故障影响已就绪口令：故障提示本身及下游的 ready 口令立即失效（解除故障不自动恢复）。
+    // 待确认（pending）口令不失效——确认时会因故障被拒并保持待确认。
+    const invalidatedPrep = sweepPrepReadiness(performanceId, perf.version_id);
+
+    // 事务内按最新状态计算影响范围（故障提示本身 + 所有依赖它的后续提示）
     const row = db.prepare(`
       SELECT f.*, c.label AS label, c.seq AS seq FROM cue_faults f
       JOIN cues c ON c.id = f.cue_id WHERE f.id = ?
     `).get(faultId);
     const { faults } = faultImpact(getVersionCues(perf.version_id), [row]);
-    return { fault: faults[0] };
+    return { fault: faults[0], ...(invalidatedPrep.length ? { invalidated_prep: invalidatedPrep } : {}) };
   });
 }
 
@@ -1270,6 +1684,14 @@ function continuePerformance(perf, target, operator, name) {
       WHERE performance_id = ? AND status = 'pending'
     `).run(fresh.id);
 
+    // 接续演出不承接预备状态：原演出的待确认 / 已就绪口令全部作废留痕；
+    // 接续演出（新演出、新 cue_id）无任何口令，需预备提示一律重新预备。
+    db.prepare(`
+      UPDATE cue_prep_commands SET status = 'invalidated', invalidated_reason = 'performance_continued',
+        invalidated_detail = ?, invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE performance_id = ? AND status IN ('pending','ready')
+    `).run(`原演出接续到演出 #${newId}（v${target.version_number}），预备状态不承接`, fresh.id);
+
     const newPerf = db.prepare('SELECT * FROM performances WHERE id = ?').get(newId);
     return {
       performance: newPerf,
@@ -1306,6 +1728,8 @@ const PENDING_REASON_TEXT = {
   review_pending: '待复核申请未处置',
   own_fault: '本提示有未解除故障',
   fault_blocked: '受未解除故障影响，触发冻结',
+  prep_none: '需预备确认：尚未发出预备口令',
+  prep_pending: '预备口令待另一操作人确认就绪',
   pending: '待执行',
 };
 
@@ -1362,6 +1786,10 @@ function buildHandoverSnapshot(perf) {
     WHERE r.performance_id = ? ORDER BY r.id
   `).all(perf.id);
 
+  // 当前活动预备口令（待确认 / 已就绪）：交接快照固定，签收时按最新状态核对
+  const activePreps = activePrepRows(perf.id);
+  const activePrepByCueIds = new Map(activePreps.map((k) => [k.cue_id, k]));
+
   const cue_results = cues.map((c) => {
     const summary = cueEffectiveSummary(latestByCue, c.id);
     return {
@@ -1395,6 +1823,21 @@ function buildHandoverSnapshot(perf) {
     else if ((impact.blockedByLabel.get(c.label) || []).length) {
       reasons.push({ code: 'fault_blocked', text: PENDING_REASON_TEXT.fault_blocked });
     }
+    const prep = activePrepByCueIds.get(c.id);
+    if (c.needs_prep) {
+      if (!prep) {
+        reasons.push({ code: 'prep_none', text: PENDING_REASON_TEXT.prep_none });
+      } else if (prep.status === 'pending') {
+        reasons.push({
+          code: 'prep_pending',
+          text: PENDING_REASON_TEXT.prep_pending,
+          issued_by: prep.issued_by,
+          issued_at: prep.issued_at,
+          command_id: prep.id,
+        });
+      }
+      // ready 不构成阻塞（已就绪待触发）
+    }
     if (!reasons.length) reasons.push({ code: 'pending', text: PENDING_REASON_TEXT.pending });
     pending_cues.push({
       cue_id: c.id,
@@ -1405,13 +1848,14 @@ function buildHandoverSnapshot(perf) {
       reason_text: reasons.map((r) => {
         if (r.code === 'blocked') return `${r.text}（${r.unmet.join('、')}）`;
         if (r.code === 'review_pending') return `${r.text}（申请人 ${r.requested_by}）`;
+        if (r.code === 'prep_pending') return `${r.text}（发令人 ${r.issued_by}）`;
         return r.text;
       }).join('；'),
     });
   }
 
   return {
-    version: 20261002,
+    version: 20261003,
     taken_at: new Date().toISOString(),
     version_id: perf.version_id,
     latest_event_id: latestByCue.size
@@ -1429,6 +1873,16 @@ function buildHandoverSnapshot(perf) {
       resolved_at: r.resolved_at || null,
       resolve_reason: r.resolve_reason || null,
       event_id: r.event_id || null,
+    })),
+    active_prep_commands: activePreps.map((k) => ({
+      command_id: k.id,
+      cue_id: k.cue_id,
+      label: k.label,
+      status: k.status,
+      issued_by: k.issued_by,
+      issued_at: k.issued_at,
+      confirmed_by: k.confirmed_by || null,
+      confirmed_at: k.confirmed_at || null,
     })),
     active_faults: impact.faults.map((f) => ({
       fault_id: f.id,
@@ -1458,6 +1912,7 @@ function diffHandoverSnapshot(perf, snap) {
     cue_results: [],
     review_requests: [],
     active_faults: [],
+    active_prep_commands: [],
     pending_cues: [],
   };
 
@@ -1552,6 +2007,53 @@ function diffHandoverSnapshot(perf, snap) {
           snapshot: null,
           current: { reported_by: f.reported_by, reason: f.reason, affected_labels: f.affected_labels },
           message: `登记了新故障：提示「${f.label}」（登记人 ${f.reported_by}：${f.reason}），影响 ${f.affected_labels.join('、')}`,
+        });
+      }
+    }
+
+    // 4.5) 活动预备口令：快照中的口令状态变化（待确认→就绪 / 失效 / 被重发作废 / 已消耗 / 被跳过作废），
+    //      或出现新的活动口令；就绪因前置流水变化失效已在状态中体现
+    const curPreps = activePrepRows(perf.id);
+    const curPrepById = new Map(curPreps.map((k) => [k.id, k]));
+    const curPrepByCue = new Map(curPreps.map((k) => [k.cue_id, k]));
+    for (const sp of snap.active_prep_commands || []) {
+      const cur = curPrepById.get(sp.command_id);
+      if (!cur || cur.status !== sp.status) {
+        let message;
+        if (!cur) {
+          const full = db.prepare('SELECT * FROM cue_prep_commands WHERE id = ?').get(sp.command_id);
+          if (full && full.status === 'consumed') {
+            message = `提示「${sp.label}」的预备口令已随触发 / 跳过消耗（${PREP_STATUS_TEXT.consumed}）`;
+          } else if (full && full.status === 'invalidated') {
+            message = `提示「${sp.label}」的预备口令已失效：${PREP_INVALID_REASON_TEXT[full.invalidated_reason] || full.invalidated_reason || '-'}`;
+          } else if (full && full.status === 'superseded') {
+            message = `提示「${sp.label}」的预备口令已被重新发出作废`;
+          } else {
+            message = `提示「${sp.label}」的预备口令记录已不存在`;
+          }
+        } else {
+          message = `提示「${sp.label}」的预备口令状态已变化：${PREP_STATUS_TEXT[sp.status]} → ${PREP_STATUS_TEXT[cur.status]}`;
+        }
+        groups.active_prep_commands.push({
+          command_id: sp.command_id,
+          label: sp.label,
+          kind: cur && cur.status !== sp.status ? 'changed' : 'gone',
+          snapshot: { status: sp.status, status_text: PREP_STATUS_TEXT[sp.status], issued_by: sp.issued_by },
+          current: cur ? { status: cur.status, status_text: PREP_STATUS_TEXT[cur.status], confirmed_by: cur.confirmed_by } : null,
+          message,
+        });
+      }
+    }
+    const snapPrepIds = new Set((snap.active_prep_commands || []).map((k) => k.command_id));
+    for (const k of curPreps) {
+      if (!snapPrepIds.has(k.id)) {
+        groups.active_prep_commands.push({
+          command_id: k.id,
+          label: k.label,
+          kind: 'new',
+          snapshot: null,
+          current: { status: k.status, status_text: PREP_STATUS_TEXT[k.status], issued_by: k.issued_by, confirmed_by: k.confirmed_by },
+          message: `出现新的活动预备口令：提示「${k.label}」（${PREP_STATUS_TEXT[k.status]}，发令人 ${k.issued_by}）`,
         });
       }
     }
@@ -1666,7 +2168,7 @@ function submitHandover(performanceId, handedBy, receivedBy, note) {
 }
 
 function emptyDiffGroups() {
-  return { event_position: [], cue_results: [], review_requests: [], active_faults: [], pending_cues: [] };
+  return { event_position: [], cue_results: [], review_requests: [], active_faults: [], active_prep_commands: [], pending_cues: [] };
 }
 
 /**
@@ -1744,6 +2246,7 @@ function flattenDiffs(groups) {
     ['cue_results', '有效结果'],
     ['review_requests', '复核申请'],
     ['active_faults', '未解除故障'],
+    ['active_prep_commands', '预备口令'],
     ['pending_cues', '未完成提示'],
   ];
   const diffs = [];
@@ -1869,6 +2372,60 @@ function evaluateBatch(perf, operator, items, dryRun) {
     }
   }
 
+  // 预备口令的内存态：随本组前序步骤实时推进（与 latestByCue/firedLabels 同理）。
+  // activePrepByCue: cue_id -> {id,status,snapshot:Map<label,eventId>}（仅 pending/ready）；
+  // firedEventIdByLabel: label -> 当前有效 fired 事件 id（内存态）。
+  const activePrepByCue = new Map();
+  for (const k of activePrepRows(perf.id)) {
+    let snap = {};
+    try { snap = JSON.parse(k.dep_event_snapshot || '{}'); } catch { snap = {}; }
+    activePrepByCue.set(k.cue_id, { id: k.id, status: k.status, snapshot: new Map(Object.entries(snap)) });
+  }
+  const firedEventIdByLabel = new Map();
+  for (const c of cues) {
+    const e = latestByCue.get(c.id);
+    firedEventIdByLabel.set(c.label, e && e.action === 'fired' ? e.id : null);
+  }
+  // 预览（dryRun）不写库，拟触发用负数虚拟 id，保证与确认时快照可区分、正确判定为流水变化
+  let virtualEventId = 0;
+
+  /** 就绪口令在当前内存态下是否仍满足条件（前置流水 id 快照一致 + 无故障影响） */
+  function prepReadyInMemory(cue, prep) {
+    for (const dep of cue.deps) {
+      const curId = firedEventIdByLabel.has(dep) ? firedEventIdByLabel.get(dep) : null;
+      const snapId = prep.snapshot.has(dep) ? prep.snapshot.get(dep) : null;
+      if (curId == null || curId !== snapId) return false;
+    }
+    if ((faultImpactNow.blockedByLabel.get(cue.label) || []).length) return false;
+    return true;
+  }
+
+  /**
+   * 内存态就绪失效扫描：本组前序步骤改变流水后，检查其余 ready 口令。
+   * dryRun：仅更新内存态（标记为已失效，后续步骤不再把它当就绪）；
+   * 提交（非 dryRun）：在同一写事务内把失效口令 UPDATE 为 invalidated 留痕。
+   * 返回本次失效的口令（内存结构）清单。
+   */
+  function memSweepPrep() {
+    const invalidated = [];
+    for (const cue of cues) {
+      const prep = activePrepByCue.get(cue.id);
+      if (!prep || prep.status !== 'ready') continue;
+      if (prepReadyInMemory(cue, prep)) continue;
+      prep.status = 'invalidated';
+      prep.reason = 'dep_changed';
+      invalidated.push({ cue_id: cue.id, label: cue.label, command_id: prep.id });
+      if (!dryRun) {
+        db.prepare(`
+          UPDATE cue_prep_commands SET status = 'invalidated', invalidated_reason = 'dep_changed',
+            invalidated_detail = ?, invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          WHERE id = ? AND status = 'ready'
+        `).run('成组连续处置中前置有效触发流水发生变化', prep.id);
+      }
+    }
+    return invalidated;
+  }
+
   const insertEvent = db.prepare(
     'INSERT INTO cue_events (performance_id, cue_id, action, operator, reason) VALUES (?,?,?,?,?)'
   );
@@ -1895,8 +2452,11 @@ function evaluateBatch(perf, operator, items, dryRun) {
 
   function recordSuccess(item, i, cue, action, reason) {
     let event;
+    let eventId;
     if (dryRun) {
       // 预览：以拟操作更新内存状态供后续项判定，不写库
+      virtualEventId -= 1;
+      eventId = virtualEventId;
       event = {
         id: null, performance_id: perf.id, cue_id: cue.id, action,
         operator, reason, created_at: null, source: 'manual',
@@ -1904,10 +2464,47 @@ function evaluateBatch(perf, operator, items, dryRun) {
     } else {
       const info = insertEvent.run(perf.id, cue.id, action, operator, reason);
       event = getEvent(Number(info.lastInsertRowid));
+      eventId = event.id;
     }
     latestByCue.set(cue.id, event);
     if (action === 'fired') firedLabels.add(cue.label);
     if (action === 'retracted') firedLabels.delete(cue.label);
+
+    // 预备口令内存态：触发 / 跳过消耗；撤回不影响该提示自身（触发时已消耗），但会级联影响下游
+    const prep = activePrepByCue.get(cue.id);
+    if (prep && (prep.status === 'ready' || (prep.status === 'pending' && action === 'skipped'))) {
+      if (prep.status === 'ready') {
+        prep.status = 'consumed';
+        if (!dryRun) {
+          db.prepare(
+            "UPDATE cue_prep_commands SET status = 'consumed', consumed_event_id = ? WHERE id = ? AND status IN ('pending','ready')"
+          ).run(event.id || null, prep.id);
+        }
+      } else {
+        prep.status = 'invalidated';
+        prep.reason = 'cue_skipped';
+        if (!dryRun) {
+          db.prepare(`
+            UPDATE cue_prep_commands SET status = 'invalidated', invalidated_reason = 'cue_skipped',
+              invalidated_detail = ?, invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE id = ? AND status IN ('pending','ready')
+          `).run(`提示「${cue.label}」在成组处置中被跳过`, prep.id);
+        }
+      }
+      activePrepByCue.delete(cue.id);
+    }
+    // 各提示当前有效 fired 事件 id（供后续步骤的就绪判定）
+    for (const c of cues) {
+      const e = latestByCue.get(c.id);
+      firedEventIdByLabel.set(c.label, e && e.action === 'fired' ? (e.id == null ? null : e.id) : null);
+    }
+    // dryRun 的拟触发事件无真实 id：以负数虚拟 id 标记，使依赖它的就绪口令快照比对立即判为流水变化
+    if (action === 'fired') {
+      firedEventIdByLabel.set(cue.label, dryRun ? eventId : event.id);
+    }
+    // 前序步骤可能撤回 / 重发前置：级联失效其余就绪口令
+    const prepInvalidated = memSweepPrep();
+
     successCount += 1;
     results.push({
       index: i + 1,
@@ -1920,6 +2517,7 @@ function evaluateBatch(perf, operator, items, dryRun) {
       reason,
       planned: dryRun,
       event: dryRun ? null : event,
+      ...(prepInvalidated.length ? { invalidated_prep: prepInvalidated } : {}),
     });
   }
 
@@ -1955,6 +2553,22 @@ function evaluateBatch(perf, operator, items, dryRun) {
       if (cue.needs_review) {
         recordFailure(item, i, cue, 409, '该提示需双人复核，不能在成组操作中直接触发；请先在执行台发起触发申请，并由另一操作人确认');
         return;
+      }
+      // 需预备提示：成组触发同样要求当前存在已就绪口令（待确认 / 未发口令 / 已失效均拒绝）
+      if (cue.needs_prep) {
+        const prep = activePrepByCue.get(cue.id);
+        if (!prep || prep.status !== 'ready' || !prepReadyInMemory(cue, prep)) {
+          recordFailure(
+            item, i, cue, 422,
+            !prep
+              ? `提示「${cue.label}」需预备确认：尚未发出预备口令，请先发口令并经另一操作人确认就绪`
+              : prep.status === 'pending'
+                ? `提示「${cue.label}」的预备口令尚待确认（发令人另行确认就绪后方可触发）`
+                : `提示「${cue.label}」的预备口令已失效（前置流水变化或受故障影响），请重新预备`,
+            { needs_prep: true, prep_status: !prep ? 'none' : prep.status === 'pending' ? 'pending' : 'invalidated' }
+          );
+          return;
+        }
       }
       // 未解除故障阻断触发（故障编号本身及所有依赖它的后续提示）；申请—确认同样受此限
       const faultSources = faultImpactNow.blockedByLabel.get(item.label) || [];
@@ -2120,6 +2734,8 @@ route('POST', '/api/performances/:id/batch', (body, p) => {
       success_count: plan.success_count,
       failure_count: 0,
       results: plan.results,
+      // 提交事务内按最新数据库状态再扫一遍就绪口令（与单项 / 故障 / 接续串行的最终防线）
+      invalidated_prep: sweepPrepReadiness(fresh.id, fresh.version_id),
     };
   });
 });
@@ -2326,6 +2942,7 @@ function buildClosingReport(perf, closedBy, note, closedAt) {
       description: c.description,
       deps: c.deps,
       needs_review: !!c.needs_review,
+      needs_prep: !!c.needs_prep,
       final_status: effective, // fired / skipped / null（封场核对保证非 null）
       event_id: e ? e.id : null,
       operator: e ? e.operator : null,
@@ -2370,9 +2987,23 @@ function buildClosingReport(perf, closedBy, note, closedAt) {
       superseded_at: h.superseded_at || null, superseded_by_handover_id: h.superseded_by_handover_id || null,
     }));
 
+  // 预备口令全量历史（发出 / 确认 / 消耗 / 重发作废 / 失效及原因），封场时固定可回看
+  const prep_commands = allPrepRows(perf.id).map((k) => ({
+    id: k.id, label: k.label, seq: k.seq, status: k.status,
+    status_text: PREP_STATUS_TEXT[k.status] || k.status,
+    issued_by: k.issued_by, issued_at: k.issued_at,
+    confirmed_by: k.confirmed_by || null, confirmed_at: k.confirmed_at || null,
+    invalidated_reason: k.invalidated_reason || null,
+    invalidated_reason_text: k.invalidated_reason ? (PREP_INVALID_REASON_TEXT[k.invalidated_reason] || k.invalidated_reason) : null,
+    invalidated_detail: k.invalidated_detail || null, invalidated_at: k.invalidated_at || null,
+    consumed_event_id: k.consumed_event_id || null,
+  })).sort((a, b) => a.id - b.id);
+  const prepCounts = { pending: 0, ready: 0, consumed: 0, superseded: 0, invalidated: 0 };
+  for (const k of prep_commands) prepCounts[k.status] = (prepCounts[k.status] || 0) + 1;
+
   const eventMaxId = events.length ? Math.max(...events.map((e) => e.id)) : null;
   return {
-    report_version: 20261002,
+    report_version: 20261003,
     closed_at: closedAt,
     closed_by: closedBy,
     note,
@@ -2396,6 +3027,8 @@ function buildClosingReport(perf, closedBy, note, closedAt) {
     review_requests,
     faults,
     handovers,
+    prep_commands,
+    prep_counts: prepCounts,
     events: events.map((e) => ({
       id: e.id, label: e.label, seq: e.seq, action: e.action, operator: e.operator,
       reason: e.reason || null, created_at: e.created_at, source: e.source,
