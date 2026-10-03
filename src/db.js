@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS versions (
 
 -- 提示：deps 为 JSON 数组，存放前置提示的编号（label）；
 -- needs_review=1 表示现场触发需双人复核（草稿可改，发布后随版本锁定）
+-- needs_prep=1 表示现场触发前须走「预备口令—另一操作人确认就绪」（草稿可改，发布后随版本锁定）；
+--   旧版本（含迁移补列的既有提示）默认 0，按无需预备处理
 CREATE TABLE IF NOT EXISTS cues (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   version_id   INTEGER NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS cues (
   type         TEXT NOT NULL DEFAULT 'other' CHECK (type IN ('light','sound','set','other')),
   description  TEXT NOT NULL DEFAULT '',
   deps         TEXT NOT NULL DEFAULT '[]',
-  needs_review INTEGER NOT NULL DEFAULT 0
+  needs_review INTEGER NOT NULL DEFAULT 0,
+  needs_prep   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_cues_version ON cues(version_id, seq);
 
@@ -102,6 +105,35 @@ CREATE TABLE IF NOT EXISTS cue_review_requests (
   event_id       INTEGER REFERENCES cue_events(id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_requests_perf ON cue_review_requests(performance_id, cue_id, id);
+
+-- 预备口令（standby）：仅 needs_prep=1 的提示使用。舞台监督（issued_by）填写姓名发出预备口令
+-- （issued，待确认），操作人以不同姓名确认后转为就绪（ready）。口令不算触发、不满足任何下游前置。
+-- 同一提示同时至多一条"待确认 / 已就绪"口令（部分唯一索引保证）：重新发出使旧口令失效
+-- （superseded），全部状态变化（确认 / 失效 / 消耗）逐行留痕，不删除、不改写记录。
+-- 就绪失效一律 eager：相关写事务内立即写 invalidated，解除故障不自动恢复；
+-- 触发 / 跳过消耗本提示就绪（consumed），撤回后再次触发须重新预备。
+-- status: issued 待确认；ready 已就绪（可触发）；invalidated 已失效（见 invalidated_reason）；
+--         superseded 被重新发出的新口令取代；consumed 已被触发 / 跳过消耗。
+CREATE TABLE IF NOT EXISTS cue_prep_commands (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  performance_id   INTEGER NOT NULL REFERENCES performances(id) ON DELETE CASCADE,
+  cue_id           INTEGER NOT NULL REFERENCES cues(id),
+  status           TEXT NOT NULL DEFAULT 'issued'
+                     CHECK (status IN ('issued','ready','invalidated','superseded','consumed')),
+  issued_by        TEXT NOT NULL,
+  issued_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  confirmed_by     TEXT,
+  confirmed_at     TEXT,
+  invalidated_at   TEXT,
+  invalidated_reason TEXT,
+  consumed_by      TEXT,
+  consumed_at      TEXT,
+  consumed_event_id INTEGER REFERENCES cue_events(id)
+);
+CREATE INDEX IF NOT EXISTS idx_prep_commands_perf ON cue_prep_commands(performance_id, cue_id, id);
+-- 同一演出同一提示至多一条待确认或已就绪口令
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prep_commands_active_unique
+  ON cue_prep_commands (performance_id, cue_id) WHERE status IN ('issued','ready');
 
 -- 现场设备故障登记：舞台监督按提示编号登记故障（操作人 + 原因），系统沿已发布执行单的
 -- 前置关系标出故障提示本身及所有依赖它的后续提示；未解除期间受影响提示不得触发
@@ -210,6 +242,20 @@ function migrateCuesNeedsReviewIfNeeded() {
 migrateCuesNeedsReviewIfNeeded();
 
 /**
+ * 旧库迁移：cues 表无 needs_prep 列。检测后补列，
+ * 既有提示（含已发布旧版本）默认 0，按"无需预备"处理。新库此函数为空操作。
+ * cue_prep_commands 表由 CREATE TABLE IF NOT EXISTS 自动建立，旧库无需额外迁移。
+ */
+function migrateCuesNeedsPrepIfNeeded() {
+  const cols = db.prepare('PRAGMA table_info(cues)').all();
+  if (cols.some((c) => c.name === 'needs_prep')) return;
+  db.exec('ALTER TABLE cues ADD COLUMN needs_prep INTEGER NOT NULL DEFAULT 0');
+  console.log('[init] 已迁移 cues 表：新增 needs_prep 列（既有提示默认无需预备）');
+}
+
+migrateCuesNeedsPrepIfNeeded();
+
+/**
  * 旧库迁移：performances 表新增接续相关列
  * （status 读写状态、continued_from_performance_id 来源演出、continued_at/by 接续时间与操作人）。
  * 既有演出均为现场启动、可操作，status 默认 active。新库此函数为空操作。
@@ -315,7 +361,7 @@ function seedDemoIfEmpty() {
     "INSERT INTO versions (show_id, version_number, status, note, published_at) VALUES (?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
   );
   const insertCue = db.prepare(
-    'INSERT INTO cues (version_id, seq, label, type, description, deps, needs_review) VALUES (?,?,?,?,?,?,?)'
+    'INSERT INTO cues (version_id, seq, label, type, description, deps, needs_review, needs_prep) VALUES (?,?,?,?,?,?,?,?)'
   );
   const insertPerformance = db.prepare(
     'INSERT INTO performances (show_id, version_id, name, started_by) VALUES (?,?,?,?)'
@@ -328,25 +374,26 @@ function seedDemoIfEmpty() {
     const showId = Number(insertShow.run('示例剧目《夜航》').lastInsertRowid);
 
     // 第 5 列：needs_review（1 = 现场触发需双人复核）
+    // 第 6 列：needs_prep（1 = 现场触发前须发预备口令并由另一操作人确认就绪）
     const demoCues = [
-      ['L1', 'light', '开场灯渐亮', '[]', 0],
-      ['S1', 'sound', '开场音乐起', '["L1"]', 0],
-      ['B1', 'set', '大幕升起', '["S1"]', 0],
-      ['L2', 'light', '追光打在主角位', '["L1"]', 0],
-      ['S2', 'sound', '远雷声', '["B1"]', 0],
-      ['B2', 'set', '船台推出（危险机关，需双人复核）', '["B1","L2"]', 1],
+      ['L1', 'light', '开场灯渐亮', '[]', 0, 0],
+      ['S1', 'sound', '开场音乐起', '["L1"]', 0, 0],
+      ['B1', 'set', '大幕升起（须预备口令确认就绪）', '["S1"]', 0, 1],
+      ['L2', 'light', '追光打在主角位', '["L1"]', 0, 0],
+      ['S2', 'sound', '远雷声', '["B1"]', 0, 0],
+      ['B2', 'set', '船台推出（危险机关，需双人复核）', '["B1","L2"]', 1, 1],
     ];
 
     const v1 = Number(insertVersion.run(showId, 1, 'published', '首演版').lastInsertRowid);
-    demoCues.forEach((c, i) => insertCue.run(v1, i + 1, c[0], c[1], c[2], c[3], c[4]));
+    demoCues.forEach((c, i) => insertCue.run(v1, i + 1, c[0], c[1], c[2], c[3], c[4], c[5]));
 
-    // v2 已发布：新增 S3 并调整 L2 描述（编号、类型、前置、复核标记均保留），可作为接续目标
+    // v2 已发布：新增 S3 并调整 L2 描述（编号、类型、前置、复核/预备标记均保留），可作为接续目标
     const v2 = Number(insertVersion.run(showId, 2, 'published', '现场修订版：新增雨声 S3').lastInsertRowid);
     demoCues.forEach((c, i) => {
       const desc = c[0] === 'L2' ? '追光打在主角位（提亮）' : c[2];
-      insertCue.run(v2, i + 1, c[0], c[1], desc, c[3], c[4]);
+      insertCue.run(v2, i + 1, c[0], c[1], desc, c[3], c[4], c[5]);
     });
-    insertCue.run(v2, demoCues.length + 1, 'S3', 'sound', '雨声渐入（新增）', '["S2"]', 0);
+    insertCue.run(v2, demoCues.length + 1, 'S3', 'sound', '雨声渐入（新增）', '["S2"]', 0, 0);
 
     // 一场进行中的演出（v1）：L1 已触发、S1 已跳过，其余未执行，可直接体验接续到 v2
     const perfId = Number(insertPerformance.run(showId, v1, '9月30日 晚场（进行中）', '王导').lastInsertRowid);

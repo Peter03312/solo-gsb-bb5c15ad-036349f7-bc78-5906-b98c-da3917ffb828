@@ -304,3 +304,36 @@ button.fault-btn { color: var(--fault); border-color: #6b512c; margin-top: 2px; 
 .closing-reason-row td { padding-top: 0; font-size: 12px; }
 .origin-hops { margin-top: 2px; font-size: 12px; }
 .hint-flag.flag-review { color: #b9a7f2; border-color: #5a4d86; background: #262238; }
+
+/* ---- 预备口令（standby） ---- */
+:root {
+  --prep: #4cc2a8;
+  --prep-bg: rgba(76, 194, 168, 0.10);
+  --prep-dim: #8aa09b;
+}
+.badge.prep-badge { background: #1d332e; color: var(--prep); border: 1px solid #2f6b5d; margin-left: 4px; }
+.badge.prep-ready-badge { background: #14402f; color: #67e0b4; border: 1px solid #2c7a5a; }
+.badge.prep-issued-badge { background: #2d3320; color: #c9d176; border: 1px solid #6a7039; }
+.badge.prep-consumed-badge { background: #20282d; color: #8aa09b; border: 1px solid #3a4a50; }
+.badge.prep-invalid-badge { background: #33241f; color: #e0a07a; border: 1px solid #6e4636; }
+.badge.prep-done-badge { background: #26262b; color: #9a9aa4; border: 1px solid #45454d; }
+.status.prep-ready-chip { color: #67e0b4; border-color: #2c7a5a; background: #14402f; }
+.status.prep-issued-chip { color: #c9d176; border-color: #6a7039; background: #2d3320; }
+.prep-required-text { color: #c9d176; font-weight: 600; }
+.prep-issued-text { color: #c9d176; font-weight: 600; }
+.prep-ready-text { color: #67e0b4; font-weight: 600; }
+.cue-card.prep-ready-card { border-color: #2c7a5a; box-shadow: 0 0 0 1px rgba(76, 194, 168, 0.25); }
+.prep-btn { border-color: #2f6b5d; color: var(--prep); }
+.prep-confirm-btn { background: #1d4a3a; color: #b8f0db; border: 1px solid #2c7a5a; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+.prep-confirm-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.prep-panel { border-left: 4px solid #2f6b5d; margin-bottom: 16px; }
+.prep-panel.has-active { background: #18231f; }
+.prep-active-list { padding-left: 0; margin: 6px 0 0; list-style: none; }
+.prep-item {
+  border: 1px solid #2f6b5d; border-radius: 8px; padding: 8px 12px;
+  margin: 6px 0; background: var(--prep-bg); font-size: 13px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.prep-item.prep-issued { border-color: #6a7039; background: rgba(201, 209, 118, 0.07); }
+.prep-item .small { margin-left: auto; }
+.hint-flag.flag-prep { color: var(--prep); border-color: #2f6b5d; background: var(--prep-bg); }
